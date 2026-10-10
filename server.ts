@@ -513,6 +513,41 @@ Never hallucinate citations or pretend you accessed user private direct messages
   }
 });
 
+// Voice Input Audio Transcription
+app.post('/api/ai/transcribe', async (req: Request, res: Response) => {
+  try {
+    const { audioData, mimeType } = req.body;
+    if (!audioData || typeof audioData !== 'string') {
+      res.status(400).json({ error: 'Audio data is required' });
+      return;
+    }
+
+    const ai = getAiClient();
+    const audioPart = {
+      inlineData: {
+        mimeType: mimeType || 'audio/webm',
+        data: audioData,
+      },
+    };
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.5-transcribe',
+      contents: {
+        parts: [
+          audioPart,
+          { text: 'Transcribe this voice audio accurately into clear text. Return ONLY the transcribed text without preambles or explanations.' }
+        ]
+      },
+    });
+
+    const transcript = response.text?.trim() || '';
+    res.status(200).json({ text: transcript });
+  } catch (err: any) {
+    console.error('[AI] Transcribe error:', err);
+    res.status(500).json({ error: 'Audio transcription failed', details: err.message });
+  }
+});
+
 // Messaging AI Assist (Drafting, rewriting, translating, summarizing explicitly selected text)
 app.post('/api/ai/message-assist', requireAuth, async (req: Request, res: Response) => {
   try {

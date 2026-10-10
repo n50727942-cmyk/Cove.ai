@@ -218,6 +218,14 @@ class ApiClient {
       body: JSON.stringify(payload),
     });
   }
+
+  // Voice Input Audio Transcription
+  public async transcribeAudio(audioData: string, mimeType: string = 'audio/webm'): Promise<{ text: string }> {
+    return this.request('/api/ai/transcribe', {
+      method: 'POST',
+      body: JSON.stringify({ audioData, mimeType }),
+    });
+  }
 }
 
 export const api = new ApiClient();

@@ -1,6 +1,6 @@
 {
   "name": "Cove",
   "description": "A cohesive social platform for public discovery and private conversations with grounded AI.",
-  "requestFramePermissions": [],
+  "requestFramePermissions": ["microphone"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

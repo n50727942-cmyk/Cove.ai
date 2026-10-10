@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Sparkles, Globe, MapPin, Send, Trash2, ExternalLink, X, Compass, AlertCircle, Check } from 'lucide-react';
+import { Sparkles, Globe, MapPin, Send, Trash2, ExternalLink, X, AlertCircle, Mic, MicOff, Loader2 } from 'lucide-react';
 import { api } from '../../lib/api';
 import { AIChatMessage } from '../../types';
 
@@ -13,7 +13,7 @@ export const CoveAiPanel: React.FC<CoveAiPanelProps> = ({ isOpen, onClose }) => 
     {
       id: 'welcome',
       role: 'model',
-      text: "Hello! I am Cove AI, powered by Google Gemini. You have full control over the information source: toggle Google Search grounding ON to fetch live web citations, or turn it OFF for direct model reasoning.",
+      text: "Hello! I am Cove AI, powered by Google Gemini. You can type your queries or click the microphone to speak. You also have full control over Google Search grounding for live citations.",
       timestamp: new Date().toISOString(),
     },
   ]);
@@ -22,6 +22,16 @@ export const CoveAiPanel: React.FC<CoveAiPanelProps> = ({ isOpen, onClose }) => 
   const [isMapsEnabled, setIsMapsEnabled] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Microphone & Speech-to-Text State
+  const [isListening, setIsListening] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [micError, setMicError] = useState<string | null>(null);
+  const recognitionRef = useRef<any>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const streamRef = useRef<MediaStream | null>(null);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -30,10 +40,181 @@ export const CoveAiPanel: React.FC<CoveAiPanelProps> = ({ isOpen, onClose }) => 
     }
   }, [messages, isOpen]);
 
+  // Clean up mic on unmount or modal close
+  useEffect(() => {
+    return () => {
+      stopVoiceInput();
+    };
+  }, []);
+
   if (!isOpen) return null;
 
+  // --- SPEECH-TO-TEXT IMPLEMENTATION ---
+  const startVoiceInput = async () => {
+    setMicError(null);
+
+    // 1. Check for native Web Speech API
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+
+    if (SpeechRecognition) {
+      try {
+        const recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.lang = 'en-US';
+
+        let finalTranscript = '';
+
+        recognition.onstart = () => {
+          setIsListening(true);
+        };
+
+        recognition.onresult = (event: any) => {
+          let currentInterim = '';
+          for (let i = event.resultIndex; i < event.results.length; ++i) {
+            if (event.results[i].isFinal) {
+              finalTranscript += event.results[i][0].transcript + ' ';
+            } else {
+              currentInterim += event.results[i][0].transcript;
+            }
+          }
+          const text = (finalTranscript + currentInterim).trim();
+          if (text) {
+            setPrompt(text);
+          }
+        };
+
+        recognition.onerror = (event: any) => {
+          console.warn('[Voice] SpeechRecognition error:', event.error);
+          if (event.error === 'not-allowed') {
+            setMicError('Microphone permission denied. Please allow microphone access in your browser settings.');
+          } else if (event.error !== 'no-speech') {
+            setMicError(`Voice recognition error: ${event.error}`);
+          }
+          stopVoiceInput();
+        };
+
+        recognition.onend = () => {
+          setIsListening(false);
+        };
+
+        recognitionRef.current = recognition;
+        recognition.start();
+        return;
+      } catch (err: any) {
+        console.warn('[Voice] SpeechRecognition initialization failed, falling back to MediaRecorder:', err);
+      }
+    }
+
+    // 2. Fallback using getUserMedia + MediaRecorder + Gemini Server Transcription
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setMicError('Microphone recording is not supported in this browser.');
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      audioChunksRef.current = [];
+
+      const mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      mediaRecorderRef.current = mediaRecorder;
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorder.onstop = async () => {
+        setIsListening(false);
+        setIsTranscribing(true);
+
+        try {
+          const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+          const reader = new FileReader();
+
+          reader.onloadend = async () => {
+            const base64Data = (reader.result as string).split(',')[1];
+            if (base64Data) {
+              try {
+                const res = await api.transcribeAudio(base64Data, 'audio/webm');
+                if (res.text) {
+                  setPrompt((prev) => (prev ? `${prev} ${res.text}` : res.text).trim());
+                }
+              } catch (e: any) {
+                setMicError('Failed to transcribe voice audio. Please try typing your query.');
+              } finally {
+                setIsTranscribing(false);
+              }
+            } else {
+              setIsTranscribing(false);
+            }
+          };
+
+          reader.readAsDataURL(audioBlob);
+        } catch (err) {
+          console.error('[Voice] MediaRecorder processing error:', err);
+          setIsTranscribing(false);
+        }
+
+        // Stop all audio tracks
+        if (streamRef.current) {
+          streamRef.current.getTracks().forEach((track) => track.stop());
+          streamRef.current = null;
+        }
+      };
+
+      mediaRecorder.start();
+      setIsListening(true);
+    } catch (err: any) {
+      console.error('[Voice] getUserMedia error:', err);
+      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+        setMicError('Microphone permission was denied. Please allow microphone access to speak your query.');
+      } else {
+        setMicError('Unable to access microphone. Please check your audio device.');
+      }
+      setIsListening(false);
+    }
+  };
+
+  const stopVoiceInput = () => {
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch {}
+      recognitionRef.current = null;
+    }
+
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+      try {
+        mediaRecorderRef.current.stop();
+      } catch {}
+    }
+
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+
+    setIsListening(false);
+  };
+
+  const toggleVoiceInput = () => {
+    if (isListening) {
+      stopVoiceInput();
+    } else {
+      startVoiceInput();
+    }
+  };
+
+  // --- QUERY SUBMISSION ---
   const handleSend = async (e?: React.FormEvent, customText?: string) => {
     if (e) e.preventDefault();
+    if (isListening) {
+      stopVoiceInput();
+    }
+
     const queryText = (customText || prompt).trim();
     if (!queryText || isLoading) return;
 
@@ -48,6 +229,7 @@ export const CoveAiPanel: React.FC<CoveAiPanelProps> = ({ isOpen, onClose }) => 
     setPrompt('');
     setIsLoading(true);
     setError(null);
+    setMicError(null);
 
     try {
       const historyPayload = messages.map((m) => ({
@@ -130,7 +312,7 @@ export const CoveAiPanel: React.FC<CoveAiPanelProps> = ({ isOpen, onClose }) => 
                 </span>
               </div>
               <p className="text-[11px] text-slate-500">
-                Customizable Grounding & Verified Source Controls
+                Voice Input, Live Search Grounding & Verified Sources
               </p>
             </div>
           </div>
@@ -154,7 +336,7 @@ export const CoveAiPanel: React.FC<CoveAiPanelProps> = ({ isOpen, onClose }) => 
           </div>
         </div>
 
-        {/* Source Control Bar with Explicit Search Grounding Toggle */}
+        {/* Source Control Bar with Search Grounding Toggle */}
         <div className="px-5 py-2.5 bg-slate-50/90 border-b border-slate-200/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
           {/* Main Google Search Toggle */}
           <div className="flex items-center gap-3">
@@ -199,8 +381,8 @@ export const CoveAiPanel: React.FC<CoveAiPanelProps> = ({ isOpen, onClose }) => 
 
             <span className="text-[11px] text-slate-500 hidden md:inline">
               {isSearchEnabled && !isMapsEnabled
-                ? 'Live web citations & source links active'
-                : 'Direct model output without web requests'}
+                ? 'Live citations active'
+                : 'Direct model output'}
             </span>
           </div>
 
@@ -333,10 +515,50 @@ export const CoveAiPanel: React.FC<CoveAiPanelProps> = ({ isOpen, onClose }) => 
           </div>
         )}
 
-        {/* Input Composer with Inline Search Grounding Status */}
+        {/* Voice Input Active Banner */}
+        {isListening && (
+          <div className="px-5 py-2.5 bg-rose-50 border-t border-rose-200 flex items-center justify-between text-xs text-rose-700 animate-pulse">
+            <div className="flex items-center gap-2">
+              <span className="w-2.5 h-2.5 rounded-full bg-rose-600 animate-ping" />
+              <span className="font-semibold">Microphone active — Listening to your voice...</span>
+            </div>
+            <button
+              type="button"
+              onClick={stopVoiceInput}
+              className="px-2.5 py-1 rounded-lg bg-rose-600 text-white font-semibold text-[11px] hover:bg-rose-700 transition-colors cursor-pointer"
+            >
+              Done Speaking
+            </button>
+          </div>
+        )}
+
+        {isTranscribing && (
+          <div className="px-5 py-2.5 bg-blue-50 border-t border-blue-200 flex items-center gap-2 text-xs text-blue-700">
+            <Loader2 className="w-3.5 h-3.5 animate-spin text-[#2D5AFF]" />
+            <span>Converting voice to text via Gemini...</span>
+          </div>
+        )}
+
+        {micError && (
+          <div className="px-5 py-2 bg-amber-50 border-t border-amber-200 text-xs text-amber-800 flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5">
+              <AlertCircle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+              <span>{micError}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setMicError(null)}
+              className="text-amber-600 hover:text-amber-900 font-bold text-xs"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
+        {/* Input Composer with Voice Microphone Trigger */}
         <form onSubmit={handleSend} className="p-3.5 border-t border-slate-200 bg-white space-y-2">
           <div className="flex items-center gap-2">
-            {/* Quick In-Composer Toggle Button */}
+            {/* Quick In-Composer Search Grounding Toggle */}
             <button
               type="button"
               onClick={toggleSearch}
@@ -345,7 +567,7 @@ export const CoveAiPanel: React.FC<CoveAiPanelProps> = ({ isOpen, onClose }) => 
                   ? 'Google Search Grounding is ON. Click to toggle OFF.'
                   : 'Google Search Grounding is OFF. Click to toggle ON.'
               }
-              className={`p-2 rounded-xl border transition-all cursor-pointer flex items-center gap-1.5 text-xs font-semibold ${
+              className={`p-2 rounded-xl border transition-all cursor-pointer flex items-center gap-1.5 text-xs font-semibold shrink-0 ${
                 isSearchEnabled && !isMapsEnabled
                   ? 'bg-blue-50 border-[#2D5AFF]/30 text-[#2D5AFF]'
                   : 'bg-slate-50 border-slate-200 text-slate-400 hover:text-slate-600'
@@ -357,24 +579,45 @@ export const CoveAiPanel: React.FC<CoveAiPanelProps> = ({ isOpen, onClose }) => 
               </span>
             </button>
 
+            {/* Input field */}
             <input
               type="text"
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               placeholder={
-                isMapsEnabled
-                  ? 'Ask about places or addresses (Google Maps Grounded)...'
+                isListening
+                  ? 'Listening... speak your query...'
+                  : isMapsEnabled
+                  ? 'Ask about places (Google Maps Grounded)...'
                   : isSearchEnabled
-                  ? 'Ask a question (Google Search Grounded with sources)...'
-                  : 'Ask a question (Direct Gemini generation, no web search)...'
+                  ? 'Ask a question or click the mic to speak...'
+                  : 'Ask a question (Direct Gemini, no web search)...'
               }
-              className="flex-1 px-3.5 py-2 text-xs sm:text-sm text-slate-900 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#2D5AFF]"
+              className={`flex-1 px-3.5 py-2 text-xs sm:text-sm text-slate-900 bg-slate-50 border rounded-xl focus:outline-none focus:ring-2 focus:ring-[#2D5AFF] transition-all ${
+                isListening ? 'border-rose-400 ring-2 ring-rose-200 bg-rose-50/30' : 'border-slate-200'
+              }`}
             />
 
+            {/* Microphone Button */}
+            <button
+              type="button"
+              onClick={toggleVoiceInput}
+              title={isListening ? 'Stop listening' : 'Voice input (Speech to Text)'}
+              aria-label={isListening ? 'Stop recording voice' : 'Start voice input'}
+              className={`p-2.5 rounded-xl border transition-all cursor-pointer flex items-center justify-center shrink-0 ${
+                isListening
+                  ? 'bg-rose-600 border-rose-600 text-white animate-pulse shadow-md shadow-rose-600/30 ring-2 ring-rose-300'
+                  : 'bg-slate-50 border-slate-200 text-slate-600 hover:text-[#2D5AFF] hover:border-[#2D5AFF]/40 hover:bg-blue-50/50'
+              }`}
+            >
+              {isListening ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+            </button>
+
+            {/* Send Button */}
             <button
               type="submit"
               disabled={!prompt.trim() || isLoading}
-              className="h-10 px-4 rounded-xl text-xs font-semibold text-white bg-[#2D5AFF] hover:bg-[#2448cc] disabled:opacity-40 transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs"
+              className="h-10 px-4 rounded-xl text-xs font-semibold text-white bg-[#2D5AFF] hover:bg-[#2448cc] disabled:opacity-40 transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs shrink-0"
             >
               <Send className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">Send</span>
