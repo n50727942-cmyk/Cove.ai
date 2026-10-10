@@ -31,9 +31,9 @@ export const FeedView: React.FC<FeedViewProps> = ({
 
   // Community highlights for the top story tray
   const communityHighlights = [
-    { username: 'cove', name: 'Cove', avatar: 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=150&auto=format&fit=crop&q=80', isOfficial: true },
-    { username: 'mayalin', name: 'Maya', avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80', isOfficial: false },
-    { username: 'devinchen', name: 'Devin', avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=150&auto=format&fit=crop&q=80', isOfficial: false },
+    { username: 'cove', name: 'Cove Platform', avatar: 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=150&auto=format&fit=crop&q=80', isOfficial: true },
+    { username: 'mayalin', name: 'Maya Lin', avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80', isOfficial: false },
+    { username: 'devinchen', name: 'Devin Chen', avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=150&auto=format&fit=crop&q=80', isOfficial: false },
   ];
 
   useEffect(() => {
@@ -142,7 +142,18 @@ export const FeedView: React.FC<FeedViewProps> = ({
     return `${diffDay}d ago`;
   };
 
-  // Filtered posts based on active feed filter
+  // Safe image parsing
+  const parsePostContent = (rawText: string) => {
+    const imgRegex = /!\[.*?\]\((https?:\/\/[^\s\)]+)\)/;
+    const match = rawText.match(imgRegex);
+    if (match) {
+      const cleanText = rawText.replace(imgRegex, '').trim();
+      const imageUrl = match[1];
+      return { cleanText, imageUrl };
+    }
+    return { cleanText: rawText, imageUrl: null };
+  };
+
   const displayedPosts = posts.filter((p) => {
     if (feedFilter === 'following') {
       return p.audience === 'followers' || p.authorId === currentUser.id;
@@ -151,60 +162,44 @@ export const FeedView: React.FC<FeedViewProps> = ({
   });
 
   return (
-    <div className="max-w-2xl mx-auto py-6 px-4 sm:px-6 space-y-5">
+    <div className="max-w-2xl mx-auto py-5 sm:py-7 px-4 sm:px-6 space-y-5">
       {/* Community Story / Highlights Tray */}
-      <div className="bg-white rounded-2xl p-4 border border-slate-200/80 shadow-2xs">
+      <div className="bg-white rounded-2xl p-4 sm:p-5 border border-slate-200/80 shadow-2xs">
         <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-3">
           Community Highlights
         </span>
-        <div className="flex items-center gap-4 overflow-x-auto pb-1">
-          {/* Current User Add Story Indicator */}
-          <button
-            type="button"
-            onClick={() => onOpenProfile(currentUser.username)}
-            className="flex flex-col items-center gap-1.5 shrink-0 group cursor-pointer"
-          >
-            <div className="relative w-12 h-12 rounded-full p-0.5 border-2 border-dashed border-slate-300 group-hover:border-[#2D5AFF] transition-colors">
-              {currentUser.avatarUrl ? (
-                <img src={currentUser.avatarUrl} alt="" className="w-full h-full rounded-full object-cover" />
-              ) : (
-                <div className="w-full h-full rounded-full bg-slate-100 flex items-center justify-center font-bold text-xs text-slate-600">
-                  {currentUser.displayName.charAt(0)}
-                </div>
-              )}
-            </div>
-            <span className="text-[11px] font-medium text-slate-600 truncate max-w-[60px]">
-              You
-            </span>
-          </button>
-
-          {/* Members Highlights */}
-          {communityHighlights.map((member) => (
+        <div className="flex items-center gap-4 overflow-x-auto pb-1 scrollbar-none">
+          {communityHighlights.map((hl) => (
             <button
-              key={member.username}
+              key={hl.username}
               type="button"
-              onClick={() => onOpenProfile(member.username)}
+              onClick={() => onOpenProfile(hl.username)}
               className="flex flex-col items-center gap-1.5 shrink-0 group cursor-pointer"
             >
-              <div className="w-12 h-12 rounded-full p-0.5 bg-gradient-to-tr from-[#2D5AFF] via-[#00D1B2] to-[#FF7A5C] transition-transform group-hover:scale-105">
-                <img src={member.avatar} alt={member.name} className="w-full h-full rounded-full object-cover border-2 border-white" />
+              <div className="w-13 h-13 rounded-full p-0.5 bg-gradient-to-tr from-[#2D5AFF] via-[#00D1B2] to-[#FF7A5C] group-hover:scale-105 transition-transform">
+                <div className="w-full h-full rounded-full bg-white p-0.5 overflow-hidden">
+                  <img
+                    src={hl.avatar}
+                    alt={hl.name}
+                    className="w-full h-full object-cover rounded-full"
+                  />
+                </div>
               </div>
-              <span className="text-[11px] font-medium text-slate-700 truncate max-w-[60px]">
-                {member.name}
+              <span className="text-[11px] font-bold text-slate-700 truncate max-w-[65px] group-hover:text-[#2D5AFF] transition-colors">
+                {hl.name}
               </span>
             </button>
           ))}
         </div>
       </div>
 
-      {/* Feed Filter & AI Trigger Banner */}
-      <div className="flex items-center justify-between gap-3">
-        {/* Segmented Control */}
-        <div className="flex items-center p-1 bg-slate-200/70 rounded-xl">
+      {/* Feed Filters & AI Quick Action */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-1 bg-slate-200/60 p-1 rounded-xl text-xs font-bold">
           <button
             type="button"
             onClick={() => setFeedFilter('all')}
-            className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
+            className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
               feedFilter === 'all'
                 ? 'bg-white text-slate-900 shadow-2xs'
                 : 'text-slate-600 hover:text-slate-900'
@@ -215,7 +210,7 @@ export const FeedView: React.FC<FeedViewProps> = ({
           <button
             type="button"
             onClick={() => setFeedFilter('following')}
-            className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
+            className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
               feedFilter === 'following'
                 ? 'bg-white text-slate-900 shadow-2xs'
                 : 'text-slate-600 hover:text-slate-900'
@@ -230,7 +225,7 @@ export const FeedView: React.FC<FeedViewProps> = ({
           onClick={onOpenAi}
           className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border border-slate-200/80 hover:border-[#2D5AFF]/40 text-xs font-bold text-[#2D5AFF] shadow-2xs transition-all cursor-pointer"
         >
-          <Sparkles className="w-3.5 h-3.5" />
+          <Sparkles className="w-3.5 h-3.5 text-[#2D5AFF]" />
           <span>Ask Cove AI</span>
         </button>
       </div>
@@ -260,7 +255,7 @@ export const FeedView: React.FC<FeedViewProps> = ({
                 onChange={(e) => setContent(e.target.value)}
                 maxLength={2000}
                 placeholder="What's happening in your corner of the world?"
-                className="w-full p-2.5 text-sm text-slate-900 placeholder:text-slate-400 bg-transparent border-0 focus:ring-0 focus:outline-none resize-none"
+                className="w-full p-2 text-sm text-slate-900 placeholder:text-slate-400 bg-transparent border-0 focus:ring-0 focus:outline-none resize-none"
               />
 
               {/* Media URL attachment preview */}
@@ -295,7 +290,7 @@ export const FeedView: React.FC<FeedViewProps> = ({
                         setTempMediaInput('');
                       }
                     }}
-                    className="px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-[#2D5AFF] text-white hover:bg-[#2448cc] cursor-pointer"
+                    className="px-3 py-1.5 rounded-lg text-xs font-bold bg-[#2D5AFF] text-white hover:bg-[#2448cc] cursor-pointer"
                   >
                     Attach
                   </button>
@@ -309,39 +304,32 @@ export const FeedView: React.FC<FeedViewProps> = ({
                 </div>
               )}
 
-              {error && (
-                <div className="text-xs text-rose-600 mb-2 flex items-center gap-1.5">
-                  <AlertCircle className="w-3.5 h-3.5" />
-                  <span>{error}</span>
-                </div>
-              )}
-
               <div className="flex items-center justify-between pt-3 border-t border-slate-100">
                 <div className="flex items-center gap-2">
                   {/* Audience Selector */}
-                  <div className="inline-flex rounded-lg p-0.5 bg-slate-100 border border-slate-200/60">
+                  <div className="flex items-center bg-slate-100 rounded-lg p-0.5 text-xs">
                     <button
                       type="button"
                       onClick={() => setAudience('public')}
-                      className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-md transition-all cursor-pointer ${
+                      className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-bold transition-all cursor-pointer ${
                         audience === 'public'
-                          ? 'bg-white text-slate-900 shadow-2xs font-bold'
-                          : 'text-slate-600 hover:text-slate-900'
+                          ? 'bg-white text-slate-900 shadow-2xs'
+                          : 'text-slate-500 hover:text-slate-800'
                       }`}
                     >
-                      <Globe className="w-3 h-3 text-[#2D5AFF]" />
+                      <Globe className="w-3 h-3" />
                       <span>Public</span>
                     </button>
                     <button
                       type="button"
                       onClick={() => setAudience('followers')}
-                      className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-md transition-all cursor-pointer ${
+                      className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-bold transition-all cursor-pointer ${
                         audience === 'followers'
-                          ? 'bg-white text-slate-900 shadow-2xs font-bold'
-                          : 'text-slate-600 hover:text-slate-900'
+                          ? 'bg-white text-[#00D1B2] shadow-2xs'
+                          : 'text-slate-500 hover:text-slate-800'
                       }`}
                     >
-                      <Users className="w-3 h-3 text-[#00D1B2]" />
+                      <Users className="w-3 h-3" />
                       <span>Followers</span>
                     </button>
                   </div>
@@ -350,24 +338,25 @@ export const FeedView: React.FC<FeedViewProps> = ({
                   <button
                     type="button"
                     onClick={() => setIsAddingMedia(!isAddingMedia)}
-                    title="Attach image"
-                    className="p-1.5 rounded-lg border border-slate-200 text-slate-500 hover:text-slate-800 hover:bg-slate-50 transition-colors cursor-pointer"
+                    className="p-1.5 text-slate-500 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+                    title="Add image URL"
                   >
                     <ImageIcon className="w-4 h-4" />
                   </button>
                 </div>
 
                 <div className="flex items-center gap-3">
-                  <span className="text-[11px] text-slate-400 tabular-nums">
-                    {content.length}/2000
+                  <span className={`text-[11px] font-mono ${content.length > 1800 ? 'text-amber-600 font-bold' : 'text-slate-400'}`}>
+                    {2000 - content.length}
                   </span>
+
                   <button
                     type="submit"
                     disabled={!content.trim() || isSubmitting}
-                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold text-white bg-[#2D5AFF] hover:bg-[#2448cc] transition-all disabled:opacity-40 disabled:cursor-not-allowed shadow-xs cursor-pointer"
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold text-white bg-[#2D5AFF] hover:bg-[#2448cc] disabled:opacity-40 transition-all cursor-pointer shadow-2xs"
                   >
                     <Send className="w-3.5 h-3.5" />
-                    <span>{isSubmitting ? 'Posting...' : 'Post'}</span>
+                    <span>{isSubmitting ? 'Posting...' : 'Publish'}</span>
                   </button>
                 </div>
               </div>
@@ -376,197 +365,190 @@ export const FeedView: React.FC<FeedViewProps> = ({
         </form>
       </div>
 
-      {/* Feed Stream */}
+      {error && (
+        <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-700 text-xs font-medium flex items-center gap-2">
+          <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {/* Posts Stream */}
       {isLoading ? (
-        <div className="space-y-4">
-          {[1, 2, 3].map((n) => (
-            <div key={n} className="bg-white rounded-2xl p-5 border border-slate-200/80 animate-pulse">
-              <div className="flex items-center gap-3 mb-3">
-                <div className="w-10 h-10 rounded-full bg-slate-200" />
-                <div className="space-y-1.5">
-                  <div className="w-24 h-3 bg-slate-200 rounded" />
-                  <div className="w-16 h-2.5 bg-slate-100 rounded" />
-                </div>
-              </div>
-              <div className="w-full h-12 bg-slate-100 rounded-lg mb-3" />
-            </div>
-          ))}
+        <div className="bg-white rounded-2xl p-12 text-center border border-slate-200/80 shadow-2xs">
+          <span className="w-6 h-6 border-2 border-slate-300 border-t-[#2D5AFF] rounded-full animate-spin inline-block mb-3" />
+          <p className="text-xs text-slate-400">Loading community updates...</p>
         </div>
       ) : displayedPosts.length === 0 ? (
-        <div className="bg-white rounded-2xl p-10 border border-slate-200/80 text-center space-y-3">
-          <div className="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center mx-auto text-slate-400">
-            <Globe className="w-6 h-6" />
-          </div>
+        <div className="bg-white rounded-2xl p-12 text-center border border-slate-200/80 shadow-2xs space-y-2">
           <h3 className="text-base font-bold text-slate-900 font-display">
-            {feedFilter === 'following' ? 'No updates from followed accounts' : 'Your feed is currently empty'}
+            {feedFilter === 'following' ? 'No updates from accounts you follow' : 'Your feed is currently quiet'}
           </h3>
           <p className="text-xs text-slate-500 max-w-sm mx-auto leading-relaxed">
             {feedFilter === 'following'
-              ? 'Follow more members from the Explore tab to see their exclusive updates here.'
-              : 'Be the first to share an update with the Cove community, or use the explore directory to discover and follow members.'}
+              ? 'Browse the Explore directory to discover and follow members.'
+              : 'Be the first to share an update or start a conversation with the community.'}
           </p>
         </div>
       ) : (
         <div className="space-y-4">
-          {displayedPosts.map((post) => (
-            <article
-              key={post.id}
-              className="bg-white rounded-2xl p-5 border border-slate-200/80 shadow-2xs hover:border-slate-300/80 transition-colors"
-            >
-              {/* Header: Author info & clean unboxed metadata */}
-              <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center gap-3">
+          {displayedPosts.map((post) => {
+            const { cleanText, imageUrl } = parsePostContent(post.content);
+            return (
+              <article
+                key={post.id}
+                className="bg-white rounded-2xl p-5 sm:p-6 border border-slate-200/80 shadow-2xs hover:border-slate-300/80 transition-colors"
+              >
+                {/* Header: Author info & unboxed typographic metadata */}
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <button
+                      type="button"
+                      onClick={() => onOpenProfile(post.author.username)}
+                      className="w-10 h-10 rounded-full bg-slate-100 overflow-hidden border border-slate-200 cursor-pointer shrink-0"
+                    >
+                      {post.author.avatarUrl ? (
+                        <img src={post.author.avatarUrl} alt={post.author.displayName} className="w-full h-full object-cover" />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center font-bold text-slate-600 text-sm">
+                          {post.author.displayName.charAt(0)}
+                        </div>
+                      )}
+                    </button>
+
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 truncate">
+                        <button
+                          type="button"
+                          onClick={() => onOpenProfile(post.author.username)}
+                          className="font-extrabold text-sm text-slate-900 hover:text-[#2D5AFF] transition-colors cursor-pointer truncate"
+                        >
+                          {post.author.displayName}
+                        </button>
+                        <span className="text-xs text-slate-300">·</span>
+                        <span className="text-xs text-slate-400 font-mono truncate">@{post.author.username}</span>
+                        <span className="text-xs text-slate-300">·</span>
+                        <span className="text-xs text-slate-400 shrink-0">{formatTime(post.createdAt)}</span>
+                      </div>
+
+                      <div className="flex items-center gap-1 text-[11px] text-slate-400 mt-0.5">
+                        {post.audience === 'followers' ? (
+                          <span className="inline-flex items-center gap-1 text-[#00D1B2] font-semibold">
+                            <Users className="w-3 h-3" /> Followers only
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 text-slate-400">
+                            <Globe className="w-3 h-3" /> Public
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
                   <button
                     type="button"
                     onClick={() => onOpenProfile(post.author.username)}
-                    className="w-10 h-10 rounded-full bg-slate-100 overflow-hidden border border-slate-200 cursor-pointer shrink-0"
+                    className="p-1 text-slate-400 hover:text-slate-600 rounded cursor-pointer"
                   >
-                    {post.author.avatarUrl ? (
-                      <img src={post.author.avatarUrl} alt={post.author.displayName} className="w-full h-full object-cover" />
-                    ) : (
-                      <div className="w-full h-full flex items-center justify-center font-bold text-slate-600 text-sm">
-                        {post.author.displayName.charAt(0)}
-                      </div>
-                    )}
+                    <MoreHorizontal className="w-4 h-4" />
                   </button>
-
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => onOpenProfile(post.author.username)}
-                        className="font-bold text-sm text-slate-900 hover:text-[#2D5AFF] transition-colors cursor-pointer"
-                      >
-                        {post.author.displayName}
-                      </button>
-                      {/* Zero-Pill Unboxed Metadata */}
-                      <span className="text-xs text-slate-400">·</span>
-                      <span className="text-xs text-slate-500 font-mono">@{post.author.username}</span>
-                      <span className="text-xs text-slate-400">·</span>
-                      <span className="text-xs text-slate-500">{formatTime(post.createdAt)}</span>
-                    </div>
-
-                    <div className="flex items-center gap-1.5 text-[11px] text-slate-500 mt-0.5">
-                      {post.audience === 'followers' ? (
-                        <span className="inline-flex items-center gap-1 text-[#00D1B2]">
-                          <Users className="w-3 h-3" /> Followers only
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1 text-slate-400">
-                          <Globe className="w-3 h-3" /> Public
-                        </span>
-                      )}
-                    </div>
-                  </div>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={() => onOpenProfile(post.author.username)}
-                  aria-label="Author profile"
-                  className="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-50 cursor-pointer"
-                >
-                  <MoreHorizontal className="w-4 h-4" />
-                </button>
-              </div>
+                {/* Content */}
+                <div className="text-sm text-slate-800 leading-relaxed whitespace-pre-line mb-3">
+                  <p>{cleanText}</p>
+                  {imageUrl && (
+                    <div className="mt-3 rounded-xl overflow-hidden border border-slate-200 max-h-96">
+                      <img src={imageUrl} alt="Post visual" className="w-full h-full object-cover" />
+                    </div>
+                  )}
+                </div>
 
-              {/* Content */}
-              <div className="text-sm text-slate-800 leading-relaxed whitespace-pre-line mb-4">
-                {post.content.split('![Image](')[0]}
-                {post.content.includes('![Image](') && (
-                  <div className="mt-3 rounded-xl overflow-hidden border border-slate-200 max-h-80">
-                    <img
-                      src={post.content.split('![Image](')[1].replace(/\)$/, '')}
-                      alt="Post visual"
-                      className="w-full h-full object-cover"
-                    />
-                  </div>
-                )}
-              </div>
+                {/* Action Bar */}
+                <div className="flex items-center gap-6 pt-3 border-t border-slate-100 text-xs text-slate-500 font-semibold">
+                  <button
+                    type="button"
+                    onClick={() => handleToggleLike(post.id)}
+                    className={`inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
+                      post.hasLiked ? 'text-[#FF7A5C]' : 'hover:text-[#FF7A5C]'
+                    }`}
+                  >
+                    <Heart className={`w-4 h-4 ${post.hasLiked ? 'fill-[#FF7A5C]' : ''}`} />
+                    <span className="tabular-nums">{post.likesCount}</span>
+                  </button>
 
-              {/* Action Bar */}
-              <div className="flex items-center gap-6 pt-3 border-t border-slate-100 text-xs text-slate-500 font-medium">
-                <button
-                  type="button"
-                  onClick={() => handleToggleLike(post.id)}
-                  className={`inline-flex items-center gap-1.5 transition-colors cursor-pointer ${
-                    post.hasLiked ? 'text-[#FF7A5C] font-semibold' : 'hover:text-[#FF7A5C]'
-                  }`}
-                >
-                  <Heart
-                    className={`w-4 h-4 ${post.hasLiked ? 'fill-[#FF7A5C]' : ''}`}
-                  />
-                  <span className="tabular-nums">{post.likesCount}</span>
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => handleToggleComments(post.id)}
+                    className="inline-flex items-center gap-1.5 hover:text-[#2D5AFF] transition-colors cursor-pointer"
+                  >
+                    <MessageSquare className="w-4 h-4" />
+                    <span className="tabular-nums">{post.commentsCount}</span>
+                  </button>
+                </div>
 
-                <button
-                  type="button"
-                  onClick={() => handleToggleComments(post.id)}
-                  className="inline-flex items-center gap-1.5 hover:text-[#2D5AFF] transition-colors cursor-pointer"
-                >
-                  <MessageSquare className="w-4 h-4" />
-                  <span className="tabular-nums">{post.commentsCount}</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    navigator.clipboard.writeText(window.location.href);
-                  }}
-                  className="inline-flex items-center gap-1.5 hover:text-slate-900 transition-colors ml-auto cursor-pointer"
-                >
-                  <Share2 className="w-4 h-4" />
-                  <span>Share</span>
-                </button>
-              </div>
-
-              {/* Threaded Comments Accordion */}
-              {activeCommentsPostId === post.id && (
-                <div className="mt-4 pt-4 border-t border-slate-100 space-y-3">
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="text"
-                      value={newCommentText}
-                      onChange={(e) => setNewCommentText(e.target.value)}
-                      placeholder="Write a comment..."
-                      className="flex-1 px-3 py-1.5 text-xs text-slate-900 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-[#2D5AFF]"
-                    />
-                    <button
-                      type="button"
-                      disabled={!newCommentText.trim() || isCommenting}
-                      onClick={() => handleAddComment(post.id)}
-                      className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white bg-[#2D5AFF] hover:bg-[#2448cc] disabled:opacity-40 cursor-pointer"
+                {/* Inline Threaded Comments Drawer */}
+                {activeCommentsPostId === post.id && (
+                  <div className="mt-4 pt-4 border-t border-slate-100 space-y-3">
+                    <form
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        handleAddComment(post.id);
+                      }}
+                      className="flex items-center gap-2"
                     >
-                      Reply
-                    </button>
-                  </div>
+                      <input
+                        type="text"
+                        value={newCommentText}
+                        onChange={(e) => setNewCommentText(e.target.value)}
+                        placeholder="Write a constructive comment..."
+                        className="flex-1 text-xs px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-[#2D5AFF]"
+                      />
+                      <button
+                        type="submit"
+                        disabled={!newCommentText.trim() || isCommenting}
+                        className="px-3 py-2 bg-[#2D5AFF] text-white rounded-xl text-xs font-bold hover:bg-[#2448cc] disabled:opacity-40 cursor-pointer shadow-2xs"
+                      >
+                        {isCommenting ? 'Sending...' : 'Reply'}
+                      </button>
+                    </form>
 
-                  {commentsMap[post.id]?.length ? (
-                    <div className="space-y-2 mt-2">
-                      {commentsMap[post.id].map((c) => (
-                        <div key={c.id} className="p-2.5 rounded-xl bg-slate-50/70 border border-slate-100 text-xs">
-                          <div className="flex items-center gap-2 mb-1">
+                    <div className="space-y-2.5 pt-2">
+                      {(commentsMap[post.id] || []).length === 0 ? (
+                        <p className="text-[11px] text-slate-400 text-center py-2">
+                          No comments on this post yet.
+                        </p>
+                      ) : (
+                        (commentsMap[post.id] || []).map((c) => (
+                          <div key={c.id} className="p-2.5 bg-slate-50 rounded-xl flex items-start gap-2.5">
                             <button
                               type="button"
                               onClick={() => onOpenProfile(c.author.username)}
-                              className="font-semibold text-slate-800 hover:text-[#2D5AFF]"
+                              className="w-7 h-7 rounded-full bg-slate-200 overflow-hidden shrink-0 mt-0.5 cursor-pointer"
                             >
-                              {c.author.displayName}
+                              {c.author.avatarUrl ? (
+                                <img src={c.author.avatarUrl} alt="" className="w-full h-full object-cover" />
+                              ) : (
+                                <div className="w-full h-full flex items-center justify-center font-bold text-slate-600 text-[10px]">
+                                  {c.author.displayName.charAt(0)}
+                                </div>
+                              )}
                             </button>
-                            <span className="text-[10px] text-slate-400 font-mono">@{c.author.username}</span>
-                            <span className="text-[10px] text-slate-400">· {formatTime(c.createdAt)}</span>
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-1.5 mb-0.5">
+                                <span className="text-xs font-bold text-slate-900">{c.author.displayName}</span>
+                                <span className="text-[10px] text-slate-400 font-mono">@{c.author.username}</span>
+                              </div>
+                              <p className="text-xs text-slate-700 leading-relaxed">{c.content}</p>
+                            </div>
                           </div>
-                          <p className="text-slate-700 leading-relaxed">{c.content}</p>
-                        </div>
-                      ))}
+                        ))
+                      )}
                     </div>
-                  ) : (
-                    <p className="text-[11px] text-slate-400 text-center py-2">No comments yet.</p>
-                  )}
-                </div>
-              )}
-            </article>
-          ))}
+                  </div>
+                )}
+              </article>
+            );
+          })}
         </div>
       )}
     </div>

@@ -15,6 +15,56 @@ const PORT = Number(process.env.PORT) || 3000;
 
 app.use(express.json());
 
+// Security Headers
+app.use((_req: Request, res: Response, next: NextFunction) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  next();
+});
+
+// In-memory sliding window rate limiter
+interface RateLimitRecord {
+  count: number;
+  resetAt: number;
+}
+const rateLimitMap = new Map<string, RateLimitRecord>();
+
+const rateLimit = (limit: number, windowMs: number) => {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
+    const key = `${req.path}:${ip}`;
+    const now = Date.now();
+
+    const record = rateLimitMap.get(key);
+    if (!record || now > record.resetAt) {
+      rateLimitMap.set(key, { count: 1, resetAt: now + windowMs });
+      next();
+      return;
+    }
+
+    if (record.count >= limit) {
+      const retryAfter = Math.ceil((record.resetAt - now) / 1000);
+      res.setHeader('Retry-After', retryAfter.toString());
+      res.status(429).json({ error: `Too many requests. Please wait ${retryAfter} seconds before trying again.` });
+      return;
+    }
+
+    record.count++;
+    next();
+  };
+};
+
+function isValidHttpUrl(str: string): boolean {
+  if (!str) return false;
+  try {
+    const url = new URL(str);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 // Express Auth augmentation
 declare global {
   namespace Express {
@@ -63,7 +113,7 @@ app.use(authenticate);
 // ==========================================
 
 // Register
-app.post('/api/auth/register', (req: Request, res: Response) => {
+app.post('/api/auth/register', rateLimit(10, 60000), (req: Request, res: Response) => {
   try {
     const { displayName, username, password, confirmPassword } = req.body;
 
@@ -126,7 +176,7 @@ app.post('/api/auth/register', (req: Request, res: Response) => {
 });
 
 // Login
-app.post('/api/auth/login', (req: Request, res: Response) => {
+app.post('/api/auth/login', rateLimit(15, 60000), (req: Request, res: Response) => {
   try {
     const { username, password } = req.body;
 
@@ -184,7 +234,7 @@ app.post('/api/auth/logout', (req: Request, res: Response) => {
 });
 
 // Recover Password
-app.post('/api/auth/recover', (req: Request, res: Response) => {
+app.post('/api/auth/recover', rateLimit(10, 60000), (req: Request, res: Response) => {
   try {
     const { username, recoveryPhrase, newPassword, confirmPassword } = req.body;
 
@@ -232,6 +282,13 @@ app.post('/api/auth/recover', (req: Request, res: Response) => {
 app.post('/api/users/onboarding', requireAuth, (req: Request, res: Response) => {
   try {
     const { bio, avatarUrl, isPrivate } = req.body;
+    if (avatarUrl && typeof avatarUrl === 'string' && avatarUrl.trim() !== '') {
+      if (!isValidHttpUrl(avatarUrl.trim())) {
+        res.status(400).json({ error: 'Avatar URL must be a valid http or https URL' });
+        return;
+      }
+    }
+
     const updated = db.updateUser(req.user!.id, {
       bio: typeof bio === 'string' ? bio : undefined,
       avatarUrl: typeof avatarUrl === 'string' ? avatarUrl : undefined,
@@ -244,6 +301,56 @@ app.post('/api/users/onboarding', requireAuth, (req: Request, res: Response) => 
   }
 });
 
+// Explore Active Members
+app.get('/api/explore/members', (req: Request, res: Response) => {
+  const members = db.getExploreMembers(req.user?.id);
+  res.status(200).json({ members });
+});
+
+// User Stats
+app.get('/api/users/me/stats', requireAuth, (req: Request, res: Response) => {
+  const stats = db.getUserStats(req.user!.id);
+  res.status(200).json({ stats });
+});
+
+// Follow Requests (for private profiles)
+app.get('/api/users/me/follow-requests', requireAuth, (req: Request, res: Response) => {
+  const requests = db.getFollowRequests(req.user!.id);
+  res.status(200).json({ requests });
+});
+
+app.post('/api/users/follow-requests/:followerId/accept', requireAuth, (req: Request, res: Response) => {
+  try {
+    db.acceptFollowRequest(req.user!.id, req.params.followerId);
+    res.status(200).json({ success: true });
+  } catch {
+    res.status(404).json({ error: 'Follow request not found' });
+  }
+});
+
+app.post('/api/users/follow-requests/:followerId/reject', requireAuth, (req: Request, res: Response) => {
+  try {
+    db.rejectFollowRequest(req.user!.id, req.params.followerId);
+    res.status(200).json({ success: true });
+  } catch {
+    res.status(404).json({ error: 'Follow request not found' });
+  }
+});
+
+// Specific User Posts
+app.get('/api/users/:username/posts', (req: Request, res: Response) => {
+  try {
+    const posts = db.getUserPosts(req.params.username, req.user?.id);
+    res.status(200).json({ posts });
+  } catch (err: any) {
+    if (err.message === 'USER_NOT_FOUND') {
+      res.status(404).json({ error: 'User not found' });
+      return;
+    }
+    res.status(500).json({ error: 'Failed to fetch user posts' });
+  }
+});
+
 app.get('/api/users/:username', (req: Request, res: Response) => {
   const user = db.findUserByUsername(req.params.username);
   if (!user) {
@@ -252,13 +359,15 @@ app.get('/api/users/:username', (req: Request, res: Response) => {
   }
   const safe = db.toSafeUser(user);
   const isFollowing = req.user ? db.isFollowing(req.user.id, user.id) : false;
-  res.status(200).json({ user: safe, isFollowing });
+  const followStatus = req.user ? db.getFollowStatus(req.user.id, user.id) : { isFollowing: false, isPending: false };
+  const stats = db.getUserStats(user.id);
+  res.status(200).json({ user: safe, isFollowing, isPending: followStatus.isPending, stats });
 });
 
 app.post('/api/users/:username/follow', requireAuth, (req: Request, res: Response) => {
   try {
-    const { isFollowing } = db.toggleFollow(req.user!.id, req.params.username);
-    res.status(200).json({ isFollowing });
+    const result = db.toggleFollow(req.user!.id, req.params.username);
+    res.status(200).json(result);
   } catch (err: any) {
     if (err.message === 'CANNOT_FOLLOW_SELF') {
       res.status(400).json({ error: 'You cannot follow yourself' });

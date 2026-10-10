@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Sparkles, Globe, MapPin, Send, Trash2, ExternalLink, X, AlertCircle, Mic, MicOff, Loader2 } from 'lucide-react';
+import { Sparkles, Globe, MapPin, Send, Trash2, ExternalLink, X, AlertCircle, Mic, MicOff, Loader2, ArrowUpRight, Search } from 'lucide-react';
 import { api } from '../../lib/api';
 import { AIChatMessage } from '../../types';
 
@@ -13,7 +13,7 @@ export const CoveAiPanel: React.FC<CoveAiPanelProps> = ({ isOpen, onClose }) => 
     {
       id: 'welcome',
       role: 'model',
-      text: "Hello! I am Cove AI, powered by Google Gemini. You can type your queries or click the microphone to speak. You also have full control over Google Search grounding for live citations.",
+      text: "Hello! I am Cove AI, powered by Google Gemini. You can type questions or speak into your microphone. You can also toggle Google Search or Google Maps grounding on/off anytime using the controls above.",
       timestamp: new Date().toISOString(),
     },
   ]);
@@ -59,7 +59,7 @@ export const CoveAiPanel: React.FC<CoveAiPanelProps> = ({ isOpen, onClose }) => 
     if (SpeechRecognition) {
       try {
         const recognition = new SpeechRecognition();
-        recognition.continuous = true;
+        recognition.continuous = false; // More robust across mobile browsers
         recognition.interimResults = true;
         recognition.lang = 'en-US';
 
@@ -87,9 +87,9 @@ export const CoveAiPanel: React.FC<CoveAiPanelProps> = ({ isOpen, onClose }) => 
         recognition.onerror = (event: any) => {
           console.warn('[Voice] SpeechRecognition error:', event.error);
           if (event.error === 'not-allowed') {
-            setMicError('Microphone permission denied. Please allow microphone access in your browser settings.');
+            setMicError('Microphone permission was denied. Please allow microphone access in your browser.');
           } else if (event.error !== 'no-speech') {
-            setMicError(`Voice recognition error: ${event.error}`);
+            setMicError(`Voice input error: ${event.error}`);
           }
           stopVoiceInput();
         };
@@ -102,7 +102,7 @@ export const CoveAiPanel: React.FC<CoveAiPanelProps> = ({ isOpen, onClose }) => 
         recognition.start();
         return;
       } catch (err: any) {
-        console.warn('[Voice] SpeechRecognition initialization failed, falling back to MediaRecorder:', err);
+        console.warn('[Voice] Web Speech failed, fallback to MediaRecorder:', err);
       }
     }
 
@@ -143,7 +143,7 @@ export const CoveAiPanel: React.FC<CoveAiPanelProps> = ({ isOpen, onClose }) => 
                   setPrompt((prev) => (prev ? `${prev} ${res.text}` : res.text).trim());
                 }
               } catch (e: any) {
-                setMicError('Failed to transcribe voice audio. Please try typing your query.');
+                setMicError('Could not transcribe audio. Please type your query.');
               } finally {
                 setIsTranscribing(false);
               }
@@ -158,7 +158,7 @@ export const CoveAiPanel: React.FC<CoveAiPanelProps> = ({ isOpen, onClose }) => 
           setIsTranscribing(false);
         }
 
-        // Stop all audio tracks
+        // Clean up tracks
         if (streamRef.current) {
           streamRef.current.getTracks().forEach((track) => track.stop());
           streamRef.current = null;
@@ -169,10 +169,10 @@ export const CoveAiPanel: React.FC<CoveAiPanelProps> = ({ isOpen, onClose }) => 
       setIsListening(true);
     } catch (err: any) {
       console.error('[Voice] getUserMedia error:', err);
-      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-        setMicError('Microphone permission was denied. Please allow microphone access to speak your query.');
+      if (err.name === 'NotAllowedError') {
+        setMicError('Microphone permission was denied. Please allow microphone access in your browser.');
       } else {
-        setMicError('Unable to access microphone. Please check your audio device.');
+        setMicError('Could not start microphone recording. Please type your query.');
       }
       setIsListening(false);
     }
@@ -190,6 +190,7 @@ export const CoveAiPanel: React.FC<CoveAiPanelProps> = ({ isOpen, onClose }) => 
       try {
         mediaRecorderRef.current.stop();
       } catch {}
+      mediaRecorderRef.current = null;
     }
 
     if (streamRef.current) {
@@ -200,7 +201,7 @@ export const CoveAiPanel: React.FC<CoveAiPanelProps> = ({ isOpen, onClose }) => 
     setIsListening(false);
   };
 
-  const toggleVoiceInput = () => {
+  const handleToggleVoice = () => {
     if (isListening) {
       stopVoiceInput();
     } else {
@@ -208,44 +209,43 @@ export const CoveAiPanel: React.FC<CoveAiPanelProps> = ({ isOpen, onClose }) => 
     }
   };
 
-  // --- QUERY SUBMISSION ---
-  const handleSend = async (e?: React.FormEvent, customText?: string) => {
-    if (e) e.preventDefault();
+  const handleSendMessage = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!prompt.trim() || isLoading) return;
+
     if (isListening) {
       stopVoiceInput();
     }
 
-    const queryText = (customText || prompt).trim();
-    if (!queryText || isLoading) return;
+    const userText = prompt.trim();
+    setPrompt('');
+    setError(null);
 
     const userMsg: AIChatMessage = {
-      id: 'msg_' + Date.now(),
+      id: 'u_' + Date.now(),
       role: 'user',
-      text: queryText,
+      text: userText,
       timestamp: new Date().toISOString(),
     };
 
     setMessages((prev) => [...prev, userMsg]);
-    setPrompt('');
     setIsLoading(true);
-    setError(null);
-    setMicError(null);
 
     try {
-      const historyPayload = messages.map((m) => ({
-        role: m.role,
-        text: m.text,
-      }));
+      // Build conversation history (excluding initial greeting)
+      const history = messages
+        .filter((m) => m.id !== 'welcome')
+        .map((m) => ({ role: m.role, text: m.text }));
 
       const res = await api.chatAi({
-        prompt: queryText,
-        history: historyPayload,
-        enableSearch: isSearchEnabled && !isMapsEnabled,
+        prompt: userText,
+        history,
+        enableSearch: isSearchEnabled,
         enableMaps: isMapsEnabled,
       });
 
       const modelMsg: AIChatMessage = {
-        id: 'model_' + Date.now(),
+        id: 'm_' + Date.now(),
         role: 'model',
         text: res.text,
         toolUsed: res.toolUsed,
@@ -256,276 +256,224 @@ export const CoveAiPanel: React.FC<CoveAiPanelProps> = ({ isOpen, onClose }) => 
 
       setMessages((prev) => [...prev, modelMsg]);
     } catch (err: any) {
-      setError(err.message || 'AI assistant encountered an error. Please try again.');
+      setError(err.message || 'AI service temporarily unavailable.');
     } finally {
       setIsLoading(false);
     }
   };
 
-  const handleClear = () => {
+  const handleClearChat = () => {
     setMessages([
       {
-        id: 'welcome_new',
+        id: 'welcome',
         role: 'model',
-        text: 'Chat history cleared. What would you like to explore or research next?',
+        text: "Chat cleared. What can I help you explore or research today?",
         timestamp: new Date().toISOString(),
       },
     ]);
   };
 
-  const toggleSearch = () => {
-    setIsSearchEnabled(!isSearchEnabled);
-    if (!isSearchEnabled && isMapsEnabled) {
-      setIsMapsEnabled(false);
-    }
-  };
-
-  const toggleMaps = () => {
-    setIsMapsEnabled(!isMapsEnabled);
-    if (!isMapsEnabled && isSearchEnabled) {
-      setIsSearchEnabled(false);
-    }
-  };
-
-  const suggestedPrompts = [
-    { label: 'Current World News', query: 'What are the top global news headlines today?' },
-    { label: 'Post-Quantum Crypto', query: 'Explain post-quantum key encapsulation (ML-KEM) in simple terms.' },
-    { label: 'Scenic Coffee Shops', query: 'Where are some great quiet coffee shops in Seattle?' },
-  ];
-
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-slate-900/60 backdrop-blur-xs">
-      <div className="bg-white rounded-2xl max-w-2xl w-full h-[85vh] max-h-[750px] flex flex-col shadow-2xl border border-slate-100 overflow-hidden">
-        {/* Top Header */}
-        <div className="px-5 py-3.5 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
+    <div className="fixed inset-0 z-50 flex justify-end bg-slate-900/40 backdrop-blur-xs">
+      <div className="w-full sm:max-w-xl bg-white h-full shadow-2xl flex flex-col border-l border-slate-200/80">
+        {/* Panel Header */}
+        <div className="p-4 px-5 border-b border-slate-100 flex items-center justify-between bg-white shrink-0">
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-xl bg-[#2D5AFF] text-white flex items-center justify-center shadow-xs">
+            <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-[#2D5AFF] to-[#00D1B2] flex items-center justify-center text-white shadow-xs">
               <Sparkles className="w-4 h-4" />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-sm font-bold text-slate-900 font-display">
-                  Cove AI Assistant
-                </h2>
-                <span className="text-[10px] font-semibold text-[#2D5AFF] bg-[#2D5AFF]/10 px-2 py-0.5 rounded-full">
+                <h2 className="text-sm font-extrabold text-slate-900 font-display">Cove AI</h2>
+                <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-[#2D5AFF]/10 text-[#2D5AFF]">
                   Gemini 3.8 Flash
                 </span>
               </div>
-              <p className="text-[11px] text-slate-500">
-                Voice Input, Live Search Grounding & Verified Sources
-              </p>
+              <span className="text-[11px] text-slate-400 font-medium">
+                Grounded Intelligence & Assistant
+              </span>
             </div>
           </div>
 
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1">
             <button
               type="button"
-              onClick={handleClear}
+              onClick={handleClearChat}
               title="Clear conversation"
-              className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-slate-100 transition-colors cursor-pointer"
+              className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
             >
               <Trash2 className="w-4 h-4" />
             </button>
             <button
               type="button"
               onClick={onClose}
-              className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors cursor-pointer"
+              title="Close panel"
+              className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
             >
               <X className="w-4 h-4" />
             </button>
           </div>
         </div>
 
-        {/* Source Control Bar with Search Grounding Toggle */}
-        <div className="px-5 py-2.5 bg-slate-50/90 border-b border-slate-200/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
-          {/* Main Google Search Toggle */}
-          <div className="flex items-center gap-3">
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={toggleSearch}
-                aria-pressed={isSearchEnabled && !isMapsEnabled}
-                className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-[#2D5AFF] focus:ring-offset-2 ${
-                  isSearchEnabled && !isMapsEnabled ? 'bg-[#2D5AFF]' : 'bg-slate-300'
-                }`}
-              >
-                <span
-                  className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
-                    isSearchEnabled && !isMapsEnabled ? 'translate-x-4' : 'translate-x-0'
-                  }`}
-                />
-              </button>
-
-              <button
-                type="button"
-                onClick={toggleSearch}
-                className="flex items-center gap-1.5 font-semibold text-slate-800 cursor-pointer select-none"
-              >
-                <Globe
-                  className={`w-3.5 h-3.5 ${
-                    isSearchEnabled && !isMapsEnabled ? 'text-[#2D5AFF]' : 'text-slate-400'
-                  }`}
-                />
-                <span>Google Search Grounding:</span>
-                <span
-                  className={`text-[11px] px-1.5 py-0.5 rounded font-mono ${
-                    isSearchEnabled && !isMapsEnabled
-                      ? 'bg-blue-100 text-[#2D5AFF] font-bold'
-                      : 'bg-slate-200 text-slate-600'
-                  }`}
-                >
-                  {isSearchEnabled && !isMapsEnabled ? 'ON' : 'OFF'}
-                </span>
-              </button>
-            </div>
-
-            <span className="text-[11px] text-slate-500 hidden md:inline">
-              {isSearchEnabled && !isMapsEnabled
-                ? 'Live citations active'
-                : 'Direct model output'}
-            </span>
-          </div>
-
-          {/* Optional Google Maps toggle */}
+        {/* Grounding Controls Ribbon */}
+        <div className="px-5 py-2.5 bg-slate-50 border-b border-slate-200/60 flex items-center justify-between gap-3 shrink-0">
           <div className="flex items-center gap-2">
+            {/* Google Search Toggle */}
             <button
               type="button"
-              onClick={toggleMaps}
-              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-medium transition-all cursor-pointer ${
-                isMapsEnabled
-                  ? 'bg-white text-[#00D1B2] border border-[#00D1B2]/40 shadow-2xs font-semibold'
-                  : 'text-slate-600 hover:text-slate-900 bg-white/60 border border-slate-200'
+              onClick={() => setIsSearchEnabled(!isSearchEnabled)}
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                isSearchEnabled
+                  ? 'bg-[#2D5AFF] text-white shadow-2xs'
+                  : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
               }`}
             >
-              <MapPin className={`w-3 h-3 ${isMapsEnabled ? 'text-[#00D1B2]' : 'text-slate-400'}`} />
-              <span>Places (Maps): {isMapsEnabled ? 'ON' : 'OFF'}</span>
+              <Globe className="w-3.5 h-3.5" />
+              <span>Search Grounding: {isSearchEnabled ? 'ON' : 'OFF'}</span>
+            </button>
+
+            {/* Google Maps Toggle */}
+            <button
+              type="button"
+              onClick={() => setIsMapsEnabled(!isMapsEnabled)}
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                isMapsEnabled
+                  ? 'bg-[#00D1B2] text-white shadow-2xs'
+                  : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
+              }`}
+            >
+              <MapPin className="w-3.5 h-3.5" />
+              <span>Maps: {isMapsEnabled ? 'ON' : 'OFF'}</span>
             </button>
           </div>
+
+          <span className="text-[10px] text-slate-400 font-medium hidden sm:inline">
+            Live Citations
+          </span>
         </div>
 
-        {/* Chat Thread */}
-        <div className="flex-1 p-5 overflow-y-auto space-y-4">
-          {messages.map((m) => (
-            <div
-              key={m.id}
-              className={`flex flex-col ${m.role === 'user' ? 'items-end' : 'items-start'}`}
-            >
+        {/* Chat History View */}
+        <div className="flex-1 p-5 overflow-y-auto space-y-4 bg-slate-50/20">
+          {messages.map((m) => {
+            const isUser = m.role === 'user';
+            return (
               <div
-                className={`max-w-[85%] rounded-2xl p-3.5 text-xs sm:text-sm leading-relaxed ${
-                  m.role === 'user'
-                    ? 'bg-[#2D5AFF] text-white rounded-br-xs'
-                    : 'bg-slate-100 text-slate-800 rounded-bl-xs border border-slate-200/60'
-                }`}
+                key={m.id}
+                className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`}
               >
-                <div className="whitespace-pre-line">{m.text}</div>
+                <div
+                  className={`max-w-[90%] p-3.5 rounded-2xl text-xs sm:text-sm leading-relaxed ${
+                    isUser
+                      ? 'bg-[#2D5AFF] text-white rounded-br-xs shadow-2xs'
+                      : 'bg-white text-slate-800 rounded-bl-xs border border-slate-200/80 shadow-2xs'
+                  }`}
+                >
+                  <p className="whitespace-pre-wrap">{m.text}</p>
 
-                {/* Grounding Attribution & Citations */}
-                {m.sources && m.sources.length > 0 && (
-                  <div className="mt-3 pt-2.5 border-t border-slate-200/80 text-[11px]">
-                    <div className="flex items-center gap-1.5 text-slate-600 font-semibold mb-1.5">
-                      <Globe className="w-3.5 h-3.5 text-[#2D5AFF]" />
-                      <span>Google Search Verified Sources:</span>
+                  {/* Tool used tag */}
+                  {m.toolUsed && m.toolUsed !== 'none' && (
+                    <div className="mt-2 pt-2 border-t border-slate-100 flex items-center gap-1.5 text-[11px] font-bold text-[#2D5AFF]">
+                      {m.toolUsed === 'search' ? (
+                        <>
+                          <Globe className="w-3.5 h-3.5" />
+                          <span>Grounded by Google Search</span>
+                        </>
+                      ) : (
+                        <>
+                          <MapPin className="w-3.5 h-3.5 text-[#00D1B2]" />
+                          <span className="text-[#00D1B2]">Grounded by Google Maps</span>
+                        </>
+                      )}
                     </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-                      {m.sources.map((s, idx) => (
-                        <a
-                          key={idx}
-                          href={s.uri}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="flex items-center justify-between p-1.5 px-2 rounded-lg bg-white border border-slate-200 hover:border-[#2D5AFF] text-slate-700 hover:text-[#2D5AFF] transition-colors truncate shadow-2xs"
-                        >
-                          <span className="truncate pr-1 font-medium">{s.title || s.uri}</span>
-                          <ExternalLink className="w-3 h-3 shrink-0 text-slate-400" />
-                        </a>
-                      ))}
-                    </div>
-                  </div>
-                )}
+                  )}
 
-                {/* Provenance Indicator */}
-                {m.role === 'model' && m.id !== 'welcome' && (
-                  <div className="mt-2.5 pt-1.5 border-t border-slate-200/40 flex items-center gap-1 text-[10px] text-slate-400">
-                    {m.toolUsed === 'search' ? (
-                      <span className="inline-flex items-center gap-1 text-[#2D5AFF] font-medium">
-                        <Globe className="w-3 h-3" />
-                        <span>Google Search Grounded (Live Web)</span>
+                  {/* Search Queries badge */}
+                  {m.searchQueries && m.searchQueries.length > 0 && (
+                    <div className="mt-2 text-[10px] text-slate-400 space-y-1">
+                      <span className="font-semibold block text-slate-500">Searched:</span>
+                      <div className="flex flex-wrap gap-1">
+                        {m.searchQueries.map((q, idx) => (
+                          <span key={idx} className="bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded font-mono">
+                            {q}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Grounding Source Citations */}
+                  {m.sources && m.sources.length > 0 && (
+                    <div className="mt-3 pt-2.5 border-t border-slate-100 space-y-1.5">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
+                        Verified Web Sources ({m.sources.length})
                       </span>
-                    ) : m.toolUsed === 'maps' ? (
-                      <span className="inline-flex items-center gap-1 text-[#00D1B2] font-medium">
-                        <MapPin className="w-3 h-3" />
-                        <span>Google Maps Grounded</span>
-                      </span>
-                    ) : (
-                      <span className="inline-flex items-center gap-1 text-slate-500">
-                        <Sparkles className="w-3 h-3 text-slate-400" />
-                        <span>Direct Model Output (Search Grounding Off)</span>
-                      </span>
-                    )}
-                  </div>
-                )}
+                      <div className="space-y-1">
+                        {m.sources.map((s, idx) => (
+                          <a
+                            key={idx}
+                            href={s.uri}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="flex items-center justify-between p-2 rounded-lg bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs transition-colors group"
+                          >
+                            <span className="truncate pr-2 font-medium">
+                              {s.title || s.uri}
+                            </span>
+                            <ArrowUpRight className="w-3.5 h-3.5 text-slate-400 group-hover:text-[#2D5AFF] shrink-0" />
+                          </a>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
 
           {isLoading && (
-            <div className="flex items-start">
-              <div className="bg-slate-100 rounded-2xl rounded-bl-xs p-3.5 text-xs text-slate-600 border border-slate-200/60 flex items-center gap-2">
-                <span className="w-3.5 h-3.5 border-2 border-slate-400 border-t-[#2D5AFF] rounded-full animate-spin" />
-                <span>
-                  {isMapsEnabled
-                    ? 'Consulting Google Maps...'
-                    : isSearchEnabled
-                    ? 'Searching Google & verifying citations...'
-                    : 'Generating response via Gemini...'}
-                </span>
-              </div>
+            <div className="flex items-center gap-2 p-3 bg-white border border-slate-200/80 rounded-2xl w-fit shadow-2xs">
+              <span className="w-4 h-4 border-2 border-slate-300 border-t-[#2D5AFF] rounded-full animate-spin" />
+              <span className="text-xs text-slate-500">Cove AI is researching...</span>
             </div>
           )}
 
           {error && (
             <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 shrink-0" />
+              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
               <span>{error}</span>
+            </div>
+          )}
+
+          {micError && (
+            <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-xs flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+                <span>{micError}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setMicError(null)}
+                className="text-amber-800 hover:text-amber-950 font-bold"
+              >
+                ✕
+              </button>
             </div>
           )}
 
           <div ref={messagesEndRef} />
         </div>
 
-        {/* Suggested Queries */}
-        {messages.length <= 2 && (
-          <div className="px-5 py-2 border-t border-slate-100 bg-slate-50/50">
-            <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block mb-1.5">
-              Quick Prompts:
-            </span>
-            <div className="flex flex-wrap gap-1.5">
-              {suggestedPrompts.map((p, idx) => (
-                <button
-                  key={idx}
-                  type="button"
-                  onClick={() => handleSend(undefined, p.query)}
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white border border-slate-200 hover:border-slate-300 text-[11px] text-slate-700 hover:text-slate-900 transition-colors cursor-pointer"
-                >
-                  <Sparkles className="w-3 h-3 text-[#2D5AFF]" />
-                  <span>{p.label}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Voice Input Active Banner */}
+        {/* Voice Recording Active Banner */}
         {isListening && (
-          <div className="px-5 py-2.5 bg-rose-50 border-t border-rose-200 flex items-center justify-between text-xs text-rose-700 animate-pulse">
-            <div className="flex items-center gap-2">
-              <span className="w-2.5 h-2.5 rounded-full bg-rose-600 animate-ping" />
-              <span className="font-semibold">Microphone active — Listening to your voice...</span>
+          <div className="px-5 py-2.5 bg-rose-50 border-t border-rose-200 flex items-center justify-between shrink-0">
+            <div className="flex items-center gap-2 text-rose-700 text-xs font-semibold">
+              <span className="w-2.5 h-2.5 rounded-full bg-rose-600 animate-pulse" />
+              <span>Listening... Speak into your microphone</span>
             </div>
             <button
               type="button"
               onClick={stopVoiceInput}
-              className="px-2.5 py-1 rounded-lg bg-rose-600 text-white font-semibold text-[11px] hover:bg-rose-700 transition-colors cursor-pointer"
+              className="text-xs font-bold text-rose-600 hover:text-rose-800 underline cursor-pointer"
             >
               Done Speaking
             </button>
@@ -533,94 +481,43 @@ export const CoveAiPanel: React.FC<CoveAiPanelProps> = ({ isOpen, onClose }) => 
         )}
 
         {isTranscribing && (
-          <div className="px-5 py-2.5 bg-blue-50 border-t border-blue-200 flex items-center gap-2 text-xs text-blue-700">
+          <div className="px-5 py-2 bg-slate-100 border-t border-slate-200 flex items-center gap-2 text-slate-600 text-xs shrink-0">
             <Loader2 className="w-3.5 h-3.5 animate-spin text-[#2D5AFF]" />
-            <span>Converting voice to text via Gemini...</span>
+            <span>Transcribing speech with Gemini...</span>
           </div>
         )}
 
-        {micError && (
-          <div className="px-5 py-2 bg-amber-50 border-t border-amber-200 text-xs text-amber-800 flex items-center justify-between gap-2">
-            <div className="flex items-center gap-1.5">
-              <AlertCircle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-              <span>{micError}</span>
-            </div>
+        {/* Input Composer */}
+        <form onSubmit={handleSendMessage} className="p-4 border-t border-slate-100 bg-white shrink-0">
+          <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-2xl p-2 focus-within:ring-2 focus-within:ring-[#2D5AFF] focus-within:border-transparent transition-all">
+            {/* Voice Input Button */}
             <button
               type="button"
-              onClick={() => setMicError(null)}
-              className="text-amber-600 hover:text-amber-900 font-bold text-xs"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        )}
-
-        {/* Input Composer with Voice Microphone Trigger */}
-        <form onSubmit={handleSend} className="p-3.5 border-t border-slate-200 bg-white space-y-2">
-          <div className="flex items-center gap-2">
-            {/* Quick In-Composer Search Grounding Toggle */}
-            <button
-              type="button"
-              onClick={toggleSearch}
-              title={
-                isSearchEnabled && !isMapsEnabled
-                  ? 'Google Search Grounding is ON. Click to toggle OFF.'
-                  : 'Google Search Grounding is OFF. Click to toggle ON.'
-              }
-              className={`p-2 rounded-xl border transition-all cursor-pointer flex items-center gap-1.5 text-xs font-semibold shrink-0 ${
-                isSearchEnabled && !isMapsEnabled
-                  ? 'bg-blue-50 border-[#2D5AFF]/30 text-[#2D5AFF]'
-                  : 'bg-slate-50 border-slate-200 text-slate-400 hover:text-slate-600'
-              }`}
-            >
-              <Globe className="w-4 h-4" />
-              <span className="hidden sm:inline text-[11px]">
-                Search: {isSearchEnabled && !isMapsEnabled ? 'ON' : 'OFF'}
-              </span>
-            </button>
-
-            {/* Input field */}
-            <input
-              type="text"
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              placeholder={
+              onClick={handleToggleVoice}
+              title={isListening ? 'Stop listening' : 'Speak your query'}
+              className={`p-2 rounded-xl transition-all cursor-pointer ${
                 isListening
-                  ? 'Listening... speak your query...'
-                  : isMapsEnabled
-                  ? 'Ask about places (Google Maps Grounded)...'
-                  : isSearchEnabled
-                  ? 'Ask a question or click the mic to speak...'
-                  : 'Ask a question (Direct Gemini, no web search)...'
-              }
-              className={`flex-1 px-3.5 py-2 text-xs sm:text-sm text-slate-900 bg-slate-50 border rounded-xl focus:outline-none focus:ring-2 focus:ring-[#2D5AFF] transition-all ${
-                isListening ? 'border-rose-400 ring-2 ring-rose-200 bg-rose-50/30' : 'border-slate-200'
-              }`}
-            />
-
-            {/* Microphone Button */}
-            <button
-              type="button"
-              onClick={toggleVoiceInput}
-              title={isListening ? 'Stop listening' : 'Voice input (Speech to Text)'}
-              aria-label={isListening ? 'Stop recording voice' : 'Start voice input'}
-              className={`p-2.5 rounded-xl border transition-all cursor-pointer flex items-center justify-center shrink-0 ${
-                isListening
-                  ? 'bg-rose-600 border-rose-600 text-white animate-pulse shadow-md shadow-rose-600/30 ring-2 ring-rose-300'
-                  : 'bg-slate-50 border-slate-200 text-slate-600 hover:text-[#2D5AFF] hover:border-[#2D5AFF]/40 hover:bg-blue-50/50'
+                  ? 'bg-rose-500 text-white animate-pulse'
+                  : 'text-slate-500 hover:text-[#2D5AFF] hover:bg-slate-200/60'
               }`}
             >
               {isListening ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
             </button>
 
-            {/* Send Button */}
+            <input
+              type="text"
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              placeholder={isListening ? 'Listening to your voice...' : 'Ask anything, or use voice...'}
+              className="flex-1 text-xs sm:text-sm text-slate-900 placeholder:text-slate-400 bg-transparent border-0 focus:ring-0 focus:outline-none"
+            />
+
             <button
               type="submit"
               disabled={!prompt.trim() || isLoading}
-              className="h-10 px-4 rounded-xl text-xs font-semibold text-white bg-[#2D5AFF] hover:bg-[#2448cc] disabled:opacity-40 transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs shrink-0"
+              className="p-2.5 rounded-xl bg-[#2D5AFF] text-white hover:bg-[#2448cc] disabled:opacity-40 transition-all cursor-pointer shadow-2xs"
             >
-              <Send className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Send</span>
+              <Send className="w-4 h-4" />
             </button>
           </div>
         </form>

@@ -159,6 +159,59 @@ async function runAuthTests() {
     assert.strictEqual(reloadedUser.bio, 'Lover of photography and cryptography.');
   });
 
+  // TEST 9: Timing Attack Defense on Password Recovery
+  test('9. Timing Attack Defense: Non-existent username triggers dummy scrypt verification', () => {
+    assert.throws(
+      () => {
+        db.resetPasswordWithRecovery('nonexistent_user', 'any sample phrase words', 'NewPassword123!');
+      },
+      /INVALID_RECOVERY/,
+      'Non-existent username must reject with INVALID_RECOVERY after constant-time check'
+    );
+  });
+
+  // TEST 10: Private Account Access Control & Follow Approval
+  test('10. Privacy & Authorization: Private profile posts protected until follow request accepted', () => {
+    // Register private user
+    const { user: privateUser } = db.createUser({
+      displayName: 'Private Creator',
+      username: 'privatecreator',
+      password: 'PrivatePass123!',
+    });
+    db.updateUser(privateUser.id, { isPrivate: true });
+
+    // Create a post
+    db.createPost(privateUser.id, 'Secret private studio project notes', 'followers');
+
+    const alex = db.findUserByUsername('alexrivers')!;
+
+    // Alex should not see the post yet
+    const postsBefore = db.getUserPosts('privatecreator', alex.id);
+    assert.strictEqual(postsBefore.length, 0, 'Non-follower must not see private user posts');
+
+    // Alex sends follow request
+    const followReq = db.toggleFollow(alex.id, 'privatecreator');
+    assert.strictEqual(followReq.isPending, true, 'Request to private account must be pending');
+
+    // Private user accepts follow request
+    db.acceptFollowRequest(privateUser.id, alex.id);
+
+    // Now Alex is an approved follower and can view posts
+    const postsAfter = db.getUserPosts('privatecreator', alex.id);
+    assert.strictEqual(postsAfter.length, 1, 'Approved follower must view private user posts');
+    assert.strictEqual(postsAfter[0].content, 'Secret private studio project notes');
+  });
+
+  // TEST 11: Explore Community Directory Retrieval
+  test('11. Explore Directory: Live registered accounts are discoverable with follow states', () => {
+    const alex = db.findUserByUsername('alexrivers')!;
+    const members = db.getExploreMembers(alex.id);
+    assert.ok(members.length >= 2, 'Explore must list other registered members');
+    const privateMember = members.find(m => m.user.username === 'privatecreator');
+    assert.ok(privateMember, 'Private member must be present in explore directory');
+    assert.strictEqual(privateMember.isFollowing, true, 'Alex is following privatecreator');
+  });
+
   // Clean up test file
   if (fs.existsSync(testDbPath)) {
     fs.unlinkSync(testDbPath);

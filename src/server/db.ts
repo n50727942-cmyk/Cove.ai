@@ -56,6 +56,7 @@ export interface Comment {
 export interface Follow {
   followerId: string;
   followingId: string;
+  status: 'pending' | 'accepted';
   createdAt: string;
 }
 
@@ -184,7 +185,13 @@ export class Database {
   }
 
   private seedDefaultsIfEmpty(): void {
-    // Only seed public exploratory accounts if users table is empty
+    // Only seed public exploratory accounts if explicit flag or test environment is active
+    // Prevents predictable shared default accounts in production environments
+    const isDevSeedEnabled = process.env.ENABLE_DEV_SEED === 'true' || process.env.NODE_ENV === 'test';
+    if (!isDevSeedEnabled) {
+      return;
+    }
+
     if (this.data.users.length === 0) {
       const now = new Date().toISOString();
       const demoUsers = [
@@ -196,7 +203,8 @@ export class Database {
           avatarUrl: 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=150&auto=format&fit=crop&q=80',
           isPrivate: false,
           hasCompletedOnboarding: true,
-          password: 'Password123!',
+          // Generate a cryptographically randomized password for dev seed
+          password: crypto.randomBytes(16).toString('hex') + '!Aa1',
           posts: [
             'Welcome to Cove! Here, public sharing connects you with the world, while your conversations remain strictly yours. Try asking Cove AI for grounded answers, or explore our privacy settings.',
             'Design philosophy: Zero clutter, uncompromised user sovereignty, and honest technology.'
@@ -210,7 +218,7 @@ export class Database {
           avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
           isPrivate: false,
           hasCompletedOnboarding: true,
-          password: 'Password123!',
+          password: crypto.randomBytes(16).toString('hex') + '!Aa1',
           posts: [
             'Morning light across the waterfront pier. The clean brutalist concrete lines always look best right as the sun clears the horizon.'
           ]
@@ -223,7 +231,7 @@ export class Database {
           avatarUrl: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=150&auto=format&fit=crop&q=80',
           isPrivate: false,
           hasCompletedOnboarding: true,
-          password: 'Password123!',
+          password: crypto.randomBytes(16).toString('hex') + '!Aa1',
           posts: [
             'Really appreciating platforms that prioritize intentional communication over algorithmic outrage cycles. Looking forward to connecting here!'
           ]
@@ -271,7 +279,7 @@ export class Database {
       }
 
       this.persist();
-      console.log('[DB] Initial exploratory seed accounts populated.');
+      console.log('[DB] Development exploratory seed accounts populated with unique randomized credentials.');
     }
   }
 
@@ -377,7 +385,11 @@ export class Database {
 
   public resetPasswordWithRecovery(username: string, recoveryPhrase: string, newPassword: string): { user: SafeUser; newRecoveryPhrase: string } {
     const user = this.findUserByUsername(username);
-    if (!user) throw new Error('INVALID_RECOVERY');
+    if (!user) {
+      // Execute dummy scrypt verification to prevent timing attacks that enumerate valid usernames
+      this.verifyPassword(recoveryPhrase, '00'.repeat(64), '00'.repeat(32));
+      throw new Error('INVALID_RECOVERY');
+    }
 
     const isValid = this.verifyRecoveryPhrase(recoveryPhrase, user.recoveryHash, user.recoverySalt);
     if (!isValid) throw new Error('INVALID_RECOVERY');
@@ -452,6 +464,37 @@ export class Database {
     this.persist();
   }
 
+  // --- AUTHORIZATION & RELATIONSHIP HELPERS ---
+  public isBlocked(userA: string, userB: string): boolean {
+    return this.data.safetyActions.some(
+      s => s.actionType === 'block' &&
+      ((s.actorId === userA && s.targetId === userB) || (s.actorId === userB && s.targetId === userA))
+    );
+  }
+
+  public isApprovedFollower(followerId: string, followingId: string): boolean {
+    return this.data.follows.some(
+      f => f.followerId === followerId && f.followingId === followingId && f.status === 'accepted'
+    );
+  }
+
+  public isFollowing(followerId: string, followingId: string): boolean {
+    return this.isApprovedFollower(followerId, followingId);
+  }
+
+  public canViewUserContent(viewerId: string | undefined, targetUserId: string): boolean {
+    if (viewerId === targetUserId) return true;
+    if (viewerId && this.isBlocked(viewerId, targetUserId)) return false;
+
+    const targetUser = this.findUserById(targetUserId);
+    if (!targetUser) return false;
+
+    if (!targetUser.isPrivate) return true;
+    if (!viewerId) return false;
+
+    return this.isApprovedFollower(viewerId, targetUserId);
+  }
+
   // --- SOCIAL FEED & POSTS ---
   public createPost(authorId: string, content: string, audience: 'public' | 'followers' = 'public'): Post {
     const post: Post = {
@@ -468,36 +511,28 @@ export class Database {
     return post;
   }
 
+  public getPostById(postId: string): Post | undefined {
+    return this.data.posts.find(p => p.id === postId);
+  }
+
   public getFeed(viewerId?: string): (Post & { author: SafeUser; hasLiked: boolean })[] {
-    const blockedUserIds = new Set<string>();
-    if (viewerId) {
-      this.data.safetyActions
-        .filter(s => s.actorId === viewerId && s.actionType === 'block')
-        .forEach(s => blockedUserIds.add(s.targetId));
-      this.data.safetyActions
-        .filter(s => s.targetId === viewerId && s.actionType === 'block')
-        .forEach(s => blockedUserIds.add(s.actorId));
-    }
-
-    const followingIds = new Set<string>();
-    if (viewerId) {
-      this.data.follows
-        .filter(f => f.followerId === viewerId)
-        .forEach(f => followingIds.add(f.followingId));
-    }
-
     const result: (Post & { author: SafeUser; hasLiked: boolean })[] = [];
 
     for (const p of this.data.posts) {
-      if (blockedUserIds.has(p.authorId)) continue;
-
-      // Audience check
-      if (p.audience === 'followers' && p.authorId !== viewerId && !followingIds.has(p.authorId)) {
-        continue;
-      }
+      if (viewerId && this.isBlocked(viewerId, p.authorId)) continue;
 
       const author = this.findUserById(p.authorId);
       if (!author) continue;
+
+      // Private profile rule: If author is private, non-followers cannot see posts
+      if (author.isPrivate && p.authorId !== viewerId && (!viewerId || !this.isApprovedFollower(viewerId, p.authorId))) {
+        continue;
+      }
+
+      // Audience check: If audience is 'followers', non-followers cannot see
+      if (p.audience === 'followers' && p.authorId !== viewerId && (!viewerId || !this.isApprovedFollower(viewerId, p.authorId))) {
+        continue;
+      }
 
       const hasLiked = viewerId
         ? this.data.postLikes.some(l => l.postId === p.id && l.userId === viewerId)
@@ -513,9 +548,77 @@ export class Database {
     return result;
   }
 
+  public getUserPosts(username: string, viewerId?: string): (Post & { author: SafeUser; hasLiked: boolean })[] {
+    const user = this.findUserByUsername(username);
+    if (!user) throw new Error('USER_NOT_FOUND');
+
+    if (!this.canViewUserContent(viewerId, user.id)) {
+      return [];
+    }
+
+    return this.data.posts
+      .filter(p => p.authorId === user.id)
+      .filter(p => {
+        if (p.audience === 'followers' && user.id !== viewerId && (!viewerId || !this.isApprovedFollower(viewerId, user.id))) {
+          return false;
+        }
+        return true;
+      })
+      .map(p => {
+        const hasLiked = viewerId ? this.data.postLikes.some(l => l.postId === p.id && l.userId === viewerId) : false;
+        return {
+          ...p,
+          author: this.toSafeUser(user),
+          hasLiked,
+        };
+      });
+  }
+
+  public getUserStats(userId: string): { followersCount: number; followingCount: number; postsCount: number } {
+    const followersCount = this.data.follows.filter(f => f.followingId === userId && f.status === 'accepted').length;
+    const followingCount = this.data.follows.filter(f => f.followerId === userId && f.status === 'accepted').length;
+    const postsCount = this.data.posts.filter(p => p.authorId === userId).length;
+    return { followersCount, followingCount, postsCount };
+  }
+
+  public getExploreMembers(currentUserId?: string): {
+    user: SafeUser;
+    isFollowing: boolean;
+    isPending: boolean;
+    followersCount: number;
+    postsCount: number;
+  }[] {
+    return this.data.users
+      .filter(u => {
+        if (currentUserId && u.id === currentUserId) return false;
+        if (currentUserId && this.isBlocked(currentUserId, u.id)) return false;
+        return true;
+      })
+      .map(u => {
+        const stats = this.getUserStats(u.id);
+        const followStatus = currentUserId ? this.getFollowStatus(currentUserId, u.id) : { isFollowing: false, isPending: false };
+        return {
+          user: this.toSafeUser(u),
+          isFollowing: followStatus.isFollowing,
+          isPending: followStatus.isPending,
+          followersCount: stats.followersCount,
+          postsCount: stats.postsCount,
+        };
+      })
+      .sort((a, b) => b.followersCount - a.followersCount);
+  }
+
   public toggleLike(postId: string, userId: string): { hasLiked: boolean; likesCount: number } {
     const post = this.data.posts.find(p => p.id === postId);
     if (!post) throw new Error('POST_NOT_FOUND');
+
+    if (this.isBlocked(userId, post.authorId)) {
+      throw new Error('BLOCKED');
+    }
+
+    if (!this.canViewUserContent(userId, post.authorId)) {
+      throw new Error('UNAUTHORIZED');
+    }
 
     const existingIdx = this.data.postLikes.findIndex(l => l.postId === postId && l.userId === userId);
     let hasLiked = false;
@@ -542,6 +645,14 @@ export class Database {
     const post = this.data.posts.find(p => p.id === postId);
     if (!post) throw new Error('POST_NOT_FOUND');
 
+    if (this.isBlocked(authorId, post.authorId)) {
+      throw new Error('BLOCKED');
+    }
+
+    if (!this.canViewUserContent(authorId, post.authorId)) {
+      throw new Error('UNAUTHORIZED');
+    }
+
     const author = this.findUserById(authorId);
     if (!author) throw new Error('AUTHOR_NOT_FOUND');
 
@@ -560,46 +671,107 @@ export class Database {
     return { ...comment, author: this.toSafeUser(author) };
   }
 
-  public getPostComments(postId: string): (Comment & { author: SafeUser })[] {
+  public getPostComments(postId: string, viewerId?: string): (Comment & { author: SafeUser })[] {
+    const post = this.data.posts.find(p => p.id === postId);
+    if (!post) throw new Error('POST_NOT_FOUND');
+
+    if (!this.canViewUserContent(viewerId, post.authorId)) {
+      throw new Error('UNAUTHORIZED');
+    }
+
     return this.data.comments
       .filter(c => c.postId === postId)
+      .filter(c => !viewerId || !this.isBlocked(viewerId, c.authorId))
       .map(c => {
         const author = this.findUserById(c.authorId)!;
         return { ...c, author: this.toSafeUser(author) };
       });
   }
 
-  // --- SOCIAL GRAPH (FOLLOWS & SAFETY) ---
-  public toggleFollow(followerId: string, targetUsername: string): { isFollowing: boolean } {
+  // --- SOCIAL GRAPH (FOLLOWS & FOLLOW REQUESTS) ---
+  public toggleFollow(followerId: string, targetUsername: string): { isFollowing: boolean; isPending: boolean } {
     const target = this.findUserByUsername(targetUsername);
     if (!target) throw new Error('USER_NOT_FOUND');
     if (target.id === followerId) throw new Error('CANNOT_FOLLOW_SELF');
 
+    if (this.isBlocked(followerId, target.id)) {
+      throw new Error('BLOCKED');
+    }
+
     const existingIdx = this.data.follows.findIndex(f => f.followerId === followerId && f.followingId === target.id);
-    let isFollowing = false;
 
     if (existingIdx >= 0) {
+      // Unfollow / cancel request
       this.data.follows.splice(existingIdx, 1);
-      isFollowing = false;
+      this.persist();
+      return { isFollowing: false, isPending: false };
     } else {
+      // If target account is private, status is pending approval
+      const status: 'pending' | 'accepted' = target.isPrivate ? 'pending' : 'accepted';
       this.data.follows.push({
         followerId,
         followingId: target.id,
+        status,
         createdAt: new Date().toISOString(),
       });
-      isFollowing = true;
+      this.persist();
+      return {
+        isFollowing: status === 'accepted',
+        isPending: status === 'pending',
+      };
     }
+  }
 
+  public getFollowStatus(followerId: string, targetId: string): { isFollowing: boolean; isPending: boolean } {
+    const f = this.data.follows.find(fol => fol.followerId === followerId && fol.followingId === targetId);
+    if (!f) return { isFollowing: false, isPending: false };
+    return {
+      isFollowing: f.status === 'accepted',
+      isPending: f.status === 'pending',
+    };
+  }
+
+  public getFollowRequests(targetUserId: string): (Follow & { follower: SafeUser })[] {
+    return this.data.follows
+      .filter(f => f.followingId === targetUserId && f.status === 'pending')
+      .map(f => {
+        const follower = this.findUserById(f.followerId)!;
+        return {
+          ...f,
+          follower: this.toSafeUser(follower),
+        };
+      });
+  }
+
+  public acceptFollowRequest(targetUserId: string, followerId: string): void {
+    const follow = this.data.follows.find(f => f.followingId === targetUserId && f.followerId === followerId && f.status === 'pending');
+    if (!follow) throw new Error('REQUEST_NOT_FOUND');
+    follow.status = 'accepted';
     this.persist();
-    return { isFollowing };
   }
 
-  public isFollowing(followerId: string, targetId: string): boolean {
-    return this.data.follows.some(f => f.followerId === followerId && f.followingId === targetId);
+  public rejectFollowRequest(targetUserId: string, followerId: string): void {
+    const idx = this.data.follows.findIndex(f => f.followingId === targetUserId && f.followerId === followerId && f.status === 'pending');
+    if (idx < 0) throw new Error('REQUEST_NOT_FOUND');
+    this.data.follows.splice(idx, 1);
+    this.persist();
   }
 
+  // --- SAFETY & BLOCKING ---
   public recordSafetyAction(actorId: string, targetId: string, actionType: 'block' | 'mute' | 'report', reason?: string): void {
     if (actorId === targetId) throw new Error('INVALID_TARGET');
+    if (!this.findUserById(targetId)) throw new Error('USER_NOT_FOUND');
+
+    // If blocking, also remove any existing follow relationships between them
+    if (actionType === 'block') {
+      this.data.follows = this.data.follows.filter(
+        f => !(
+          (f.followerId === actorId && f.followingId === targetId) ||
+          (f.followerId === targetId && f.followingId === actorId)
+        )
+      );
+    }
+
     this.data.safetyActions.push({
       id: 'sa_' + crypto.randomBytes(8).toString('hex'),
       actorId,
@@ -611,9 +783,28 @@ export class Database {
     this.persist();
   }
 
-  // --- MESSAGING (PROTOTYPE ONLY - NOT E2EE) ---
+  public unblockUser(actorId: string, targetId: string): void {
+    this.data.safetyActions = this.data.safetyActions.filter(
+      s => !(s.actorId === actorId && s.targetId === targetId && s.actionType === 'block')
+    );
+    this.persist();
+  }
+
+  public getBlockedUsers(actorId: string): SafeUser[] {
+    return this.data.safetyActions
+      .filter(s => s.actorId === actorId && s.actionType === 'block')
+      .map(s => this.findUserById(s.targetId))
+      .filter((u): u is User => !!u)
+      .map(u => this.toSafeUser(u));
+  }
+
+  // --- MESSAGING (HONEST STATUS & CONFIRMED DELIVERY STATES) ---
   public getOrCreateConversation(userId1: string, userId2: string): Conversation {
     if (userId1 === userId2) throw new Error('CANNOT_CHAT_SELF');
+    if (this.isBlocked(userId1, userId2)) {
+      throw new Error('BLOCKED');
+    }
+
     const existing = this.data.conversations.find(c =>
       c.participantIds.includes(userId1) && c.participantIds.includes(userId2)
     );
@@ -633,17 +824,23 @@ export class Database {
 
   public getUserConversations(userId: string): (Conversation & { otherParticipant: SafeUser; lastMessage?: Message })[] {
     const userConvs = this.data.conversations.filter(c => c.participantIds.includes(userId));
-    return userConvs.map(c => {
-      const otherId = c.participantIds.find(id => id !== userId)!;
-      const otherUser = this.findUserById(otherId)!;
-      const msgs = this.data.messages.filter(m => m.conversationId === c.id);
-      const lastMessage = msgs.length > 0 ? msgs[msgs.length - 1] : undefined;
-      return {
-        ...c,
-        otherParticipant: this.toSafeUser(otherUser),
-        lastMessage,
-      };
-    }).sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+    return userConvs
+      .filter(c => {
+        const otherId = c.participantIds.find(id => id !== userId);
+        return otherId && !this.isBlocked(userId, otherId);
+      })
+      .map(c => {
+        const otherId = c.participantIds.find(id => id !== userId)!;
+        const otherUser = this.findUserById(otherId)!;
+        const msgs = this.data.messages.filter(m => m.conversationId === c.id);
+        const lastMessage = msgs.length > 0 ? msgs[msgs.length - 1] : undefined;
+        return {
+          ...c,
+          otherParticipant: this.toSafeUser(otherUser),
+          lastMessage,
+        };
+      })
+      .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
   }
 
   public sendMessage(conversationId: string, senderId: string, content: string): Message {
@@ -651,12 +848,20 @@ export class Database {
     if (!conv) throw new Error('CONVERSATION_NOT_FOUND');
     if (!conv.participantIds.includes(senderId)) throw new Error('UNAUTHORIZED');
 
+    const otherParticipantId = conv.participantIds.find(id => id !== senderId);
+    if (otherParticipantId && this.isBlocked(senderId, otherParticipantId)) {
+      throw new Error('BLOCKED');
+    }
+
+    // Real message lifecycle:
+    // Message starts as 'sent'. Only becomes 'delivered' when recipient fetches the conversation,
+    // and 'read' when recipient explicitly views or acknowledges the thread.
     const message: Message = {
       id: 'm_' + crypto.randomBytes(8).toString('hex'),
       conversationId,
       senderId,
       content: content.trim(),
-      deliveryStatus: 'delivered',
+      deliveryStatus: 'sent',
       createdAt: new Date().toISOString(),
     };
 
@@ -671,7 +876,43 @@ export class Database {
     if (!conv || !conv.participantIds.includes(requesterId)) {
       throw new Error('UNAUTHORIZED');
     }
+
+    const otherParticipantId = conv.participantIds.find(id => id !== requesterId);
+    if (otherParticipantId && this.isBlocked(requesterId, otherParticipantId)) {
+      throw new Error('BLOCKED');
+    }
+
+    // When the recipient fetches their messages, mark unconfirmed 'sent' messages addressed to them as 'delivered'
+    let modified = false;
+    for (const m of this.data.messages) {
+      if (m.conversationId === conversationId && m.senderId !== requesterId && m.deliveryStatus === 'sent') {
+        m.deliveryStatus = 'delivered';
+        modified = true;
+      }
+    }
+    if (modified) {
+      this.persist();
+    }
+
     return this.data.messages.filter(m => m.conversationId === conversationId);
+  }
+
+  public markConversationAsRead(conversationId: string, readerId: string): void {
+    const conv = this.data.conversations.find(c => c.id === conversationId);
+    if (!conv || !conv.participantIds.includes(readerId)) {
+      throw new Error('UNAUTHORIZED');
+    }
+
+    let modified = false;
+    for (const m of this.data.messages) {
+      if (m.conversationId === conversationId && m.senderId !== readerId && m.deliveryStatus !== 'read') {
+        m.deliveryStatus = 'read';
+        modified = true;
+      }
+    }
+    if (modified) {
+      this.persist();
+    }
   }
 }
 

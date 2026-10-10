@@ -10,6 +10,28 @@ export interface SafeUser {
   updatedAt: string;
 }
 
+export interface UserStats {
+  followersCount: number;
+  followingCount: number;
+  postsCount: number;
+}
+
+export interface ExploreMember {
+  user: SafeUser;
+  isFollowing: boolean;
+  isPending: boolean;
+  followersCount: number;
+  postsCount: number;
+}
+
+export interface FollowRequest {
+  followerId: string;
+  followingId: string;
+  status: 'pending' | 'accepted';
+  createdAt: string;
+  follower: SafeUser;
+}
+
 export interface Post {
   id: string;
   authorId: string;

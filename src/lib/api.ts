@@ -1,4 +1,4 @@
-import { SafeUser, Post, Comment, Conversation, Message, AISource } from '../types';
+import { SafeUser, Post, Comment, Conversation, Message, AISource, ExploreMember, UserStats, FollowRequest } from '../types';
 
 class ApiClient {
   private token: string | null = null;
@@ -118,12 +118,40 @@ class ApiClient {
     });
   }
 
-  public async getUserProfile(username: string): Promise<{ user: SafeUser; isFollowing: boolean }> {
-    return this.request<{ user: SafeUser; isFollowing: boolean }>(`/api/users/${encodeURIComponent(username)}`);
+  public async getUserProfile(username: string): Promise<{ user: SafeUser; isFollowing: boolean; isPending?: boolean; stats?: UserStats }> {
+    return this.request<{ user: SafeUser; isFollowing: boolean; isPending?: boolean; stats?: UserStats }>(`/api/users/${encodeURIComponent(username)}`);
   }
 
-  public async toggleFollow(username: string): Promise<{ isFollowing: boolean }> {
-    return this.request<{ isFollowing: boolean }>(`/api/users/${encodeURIComponent(username)}/follow`, {
+  public async toggleFollow(username: string): Promise<{ isFollowing: boolean; isPending?: boolean }> {
+    return this.request<{ isFollowing: boolean; isPending?: boolean }>(`/api/users/${encodeURIComponent(username)}/follow`, {
+      method: 'POST',
+    });
+  }
+
+  public async getExploreMembers(): Promise<{ members: ExploreMember[] }> {
+    return this.request<{ members: ExploreMember[] }>('/api/explore/members');
+  }
+
+  public async getUserPosts(username: string): Promise<{ posts: Post[] }> {
+    return this.request<{ posts: Post[] }>(`/api/users/${encodeURIComponent(username)}/posts`);
+  }
+
+  public async getUserStats(): Promise<{ stats: UserStats }> {
+    return this.request<{ stats: UserStats }>('/api/users/me/stats');
+  }
+
+  public async getFollowRequests(): Promise<{ requests: FollowRequest[] }> {
+    return this.request<{ requests: FollowRequest[] }>('/api/users/me/follow-requests');
+  }
+
+  public async acceptFollowRequest(followerId: string): Promise<{ success: boolean }> {
+    return this.request<{ success: boolean }>(`/api/users/follow-requests/${encodeURIComponent(followerId)}/accept`, {
+      method: 'POST',
+    });
+  }
+
+  public async rejectFollowRequest(followerId: string): Promise<{ success: boolean }> {
+    return this.request<{ success: boolean }>(`/api/users/follow-requests/${encodeURIComponent(followerId)}/reject`, {
       method: 'POST',
     });
   }
