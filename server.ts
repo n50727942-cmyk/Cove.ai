@@ -1,0 +1,598 @@
+import express, { Request, Response, NextFunction } from 'express';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import dotenv from 'dotenv';
+import { GoogleGenAI } from '@google/genai';
+import { db, SafeUser } from './src/server/db';
+
+dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const app = express();
+const PORT = Number(process.env.PORT) || 3000;
+
+app.use(express.json());
+
+// Express Auth augmentation
+declare global {
+  namespace Express {
+    interface Request {
+      user?: SafeUser;
+      sessionToken?: string;
+    }
+  }
+}
+
+// Authentication extraction middleware
+const authenticate = (req: Request, res: Response, next: NextFunction): void => {
+  const authHeader = req.headers.authorization;
+  let token: string | undefined;
+
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    token = authHeader.substring(7).trim();
+  } else if (req.headers.cookie) {
+    const match = req.headers.cookie.match(/cove_session=([^;]+)/);
+    if (match) token = match[1];
+  }
+
+  if (token) {
+    const sessionData = db.getSessionByToken(token);
+    if (sessionData) {
+      req.user = sessionData.user;
+      req.sessionToken = token;
+    }
+  }
+
+  next();
+};
+
+const requireAuth = (req: Request, res: Response, next: NextFunction): void => {
+  if (!req.user) {
+    res.status(401).json({ error: 'Authentication required' });
+    return;
+  }
+  next();
+};
+
+app.use(authenticate);
+
+// ==========================================
+// AUTHENTICATION & RECOVERY API
+// ==========================================
+
+// Register
+app.post('/api/auth/register', (req: Request, res: Response) => {
+  try {
+    const { displayName, username, password, confirmPassword } = req.body;
+
+    if (!displayName || typeof displayName !== 'string' || displayName.trim().length === 0) {
+      res.status(400).json({ error: 'Display name is required (max 50 characters)' });
+      return;
+    }
+    if (displayName.trim().length > 50) {
+      res.status(400).json({ error: 'Display name cannot exceed 50 characters' });
+      return;
+    }
+
+    if (!username || typeof username !== 'string') {
+      res.status(400).json({ error: 'Username is required' });
+      return;
+    }
+
+    const cleanUsername = username.trim().toLowerCase();
+    if (!/^[a-zA-Z0-9_]{3,20}$/.test(cleanUsername)) {
+      res.status(400).json({ error: 'Username must be 3-20 characters long and contain only letters, numbers, and underscores' });
+      return;
+    }
+
+    if (!password || typeof password !== 'string' || password.length < 8) {
+      res.status(400).json({ error: 'Password must be at least 8 characters long' });
+      return;
+    }
+
+    if (password !== confirmPassword) {
+      res.status(400).json({ error: 'Password and confirmation password do not match' });
+      return;
+    }
+
+    try {
+      const { user, recoveryPhrase } = db.createUser({
+        displayName: displayName.trim(),
+        username: cleanUsername,
+        password,
+      });
+
+      const { rawToken } = db.createSession(user.id, req.headers['user-agent']);
+
+      res.setHeader('Set-Cookie', `cove_session=${rawToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${7 * 86400}`);
+      res.status(201).json({
+        user,
+        sessionToken: rawToken,
+        recoveryPhrase,
+      });
+    } catch (err: any) {
+      if (err.message === 'USERNAME_TAKEN') {
+        res.status(409).json({ error: 'This username is already taken. Please choose another.' });
+        return;
+      }
+      throw err;
+    }
+  } catch (err) {
+    console.error('[AUTH] Registration error:', err);
+    res.status(500).json({ error: 'Failed to create account. Please try again.' });
+  }
+});
+
+// Login
+app.post('/api/auth/login', (req: Request, res: Response) => {
+  try {
+    const { username, password } = req.body;
+
+    if (!username || !password || typeof username !== 'string' || typeof password !== 'string') {
+      res.status(400).json({ error: 'Username and password are required' });
+      return;
+    }
+
+    const cleanUsername = username.trim().toLowerCase();
+    const user = db.findUserByUsername(cleanUsername);
+
+    if (!user) {
+      // Run dummy verification to prevent timing attacks
+      db.verifyPassword(password, '00'.repeat(64), '00'.repeat(32));
+      res.status(401).json({ error: 'Invalid username or password' });
+      return;
+    }
+
+    const isValid = db.verifyPassword(password, user.passwordHash, user.passwordSalt);
+    if (!isValid) {
+      res.status(401).json({ error: 'Invalid username or password' });
+      return;
+    }
+
+    const { rawToken } = db.createSession(user.id, req.headers['user-agent']);
+    const safeUser = db.toSafeUser(user);
+
+    res.setHeader('Set-Cookie', `cove_session=${rawToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${7 * 86400}`);
+    res.status(200).json({
+      user: safeUser,
+      sessionToken: rawToken,
+    });
+  } catch (err) {
+    console.error('[AUTH] Login error:', err);
+    res.status(500).json({ error: 'An unexpected error occurred during login' });
+  }
+});
+
+// Current User Me
+app.get('/api/auth/me', (req: Request, res: Response) => {
+  if (!req.user) {
+    res.status(401).json({ error: 'Not authenticated' });
+    return;
+  }
+  res.status(200).json({ user: req.user });
+});
+
+// Logout
+app.post('/api/auth/logout', (req: Request, res: Response) => {
+  if (req.sessionToken) {
+    db.revokeSession(req.sessionToken);
+  }
+  res.setHeader('Set-Cookie', 'cove_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
+  res.status(200).json({ success: true });
+});
+
+// Recover Password
+app.post('/api/auth/recover', (req: Request, res: Response) => {
+  try {
+    const { username, recoveryPhrase, newPassword, confirmPassword } = req.body;
+
+    if (!username || !recoveryPhrase || !newPassword || !confirmPassword) {
+      res.status(400).json({ error: 'All recovery fields are required' });
+      return;
+    }
+
+    if (newPassword.length < 8) {
+      res.status(400).json({ error: 'New password must be at least 8 characters long' });
+      return;
+    }
+
+    if (newPassword !== confirmPassword) {
+      res.status(400).json({ error: 'New password and confirmation do not match' });
+      return;
+    }
+
+    const cleanUsername = username.trim().toLowerCase();
+
+    try {
+      const { user, newRecoveryPhrase } = db.resetPasswordWithRecovery(cleanUsername, recoveryPhrase, newPassword);
+      const { rawToken } = db.createSession(user.id, req.headers['user-agent']);
+
+      res.setHeader('Set-Cookie', `cove_session=${rawToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${7 * 86400}`);
+      res.status(200).json({
+        user,
+        sessionToken: rawToken,
+        newRecoveryPhrase,
+        message: 'Password successfully reset. Older sessions have been revoked.',
+      });
+    } catch (err: any) {
+      res.status(401).json({ error: 'Invalid recovery code or username' });
+    }
+  } catch (err) {
+    console.error('[AUTH] Recovery error:', err);
+    res.status(500).json({ error: 'Password recovery failed' });
+  }
+});
+
+// ==========================================
+// ONBOARDING & PROFILE API
+// ==========================================
+
+app.post('/api/users/onboarding', requireAuth, (req: Request, res: Response) => {
+  try {
+    const { bio, avatarUrl, isPrivate } = req.body;
+    const updated = db.updateUser(req.user!.id, {
+      bio: typeof bio === 'string' ? bio : undefined,
+      avatarUrl: typeof avatarUrl === 'string' ? avatarUrl : undefined,
+      isPrivate: typeof isPrivate === 'boolean' ? isPrivate : undefined,
+      hasCompletedOnboarding: true,
+    });
+    res.status(200).json({ user: updated });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to complete onboarding' });
+  }
+});
+
+app.get('/api/users/:username', (req: Request, res: Response) => {
+  const user = db.findUserByUsername(req.params.username);
+  if (!user) {
+    res.status(404).json({ error: 'User not found' });
+    return;
+  }
+  const safe = db.toSafeUser(user);
+  const isFollowing = req.user ? db.isFollowing(req.user.id, user.id) : false;
+  res.status(200).json({ user: safe, isFollowing });
+});
+
+app.post('/api/users/:username/follow', requireAuth, (req: Request, res: Response) => {
+  try {
+    const { isFollowing } = db.toggleFollow(req.user!.id, req.params.username);
+    res.status(200).json({ isFollowing });
+  } catch (err: any) {
+    if (err.message === 'CANNOT_FOLLOW_SELF') {
+      res.status(400).json({ error: 'You cannot follow yourself' });
+      return;
+    }
+    res.status(404).json({ error: 'User not found' });
+  }
+});
+
+// ==========================================
+// SOCIAL POSTS & FEED API
+// ==========================================
+
+app.get('/api/posts', (req: Request, res: Response) => {
+  const viewerId = req.user ? req.user.id : undefined;
+  const feed = db.getFeed(viewerId);
+  res.status(200).json({ posts: feed });
+});
+
+app.post('/api/posts', requireAuth, (req: Request, res: Response) => {
+  const { content, audience } = req.body;
+  if (!content || typeof content !== 'string' || content.trim().length === 0) {
+    res.status(400).json({ error: 'Post content cannot be empty' });
+    return;
+  }
+  if (content.length > 2000) {
+    res.status(400).json({ error: 'Post exceeds 2000 character limit' });
+    return;
+  }
+  const validAudience = audience === 'followers' ? 'followers' : 'public';
+  const post = db.createPost(req.user!.id, content, validAudience);
+  res.status(201).json({ post: { ...post, author: req.user!, hasLiked: false } });
+});
+
+app.post('/api/posts/:id/react', requireAuth, (req: Request, res: Response) => {
+  try {
+    const result = db.toggleLike(req.params.id, req.user!.id);
+    res.status(200).json(result);
+  } catch {
+    res.status(404).json({ error: 'Post not found' });
+  }
+});
+
+app.post('/api/posts/:id/comments', requireAuth, (req: Request, res: Response) => {
+  try {
+    const { content } = req.body;
+    if (!content || typeof content !== 'string' || content.trim().length === 0) {
+      res.status(400).json({ error: 'Comment cannot be empty' });
+      return;
+    }
+    const comment = db.addComment(req.params.id, req.user!.id, content);
+    res.status(201).json({ comment });
+  } catch {
+    res.status(404).json({ error: 'Post not found' });
+  }
+});
+
+app.get('/api/posts/:id/comments', (req: Request, res: Response) => {
+  const comments = db.getPostComments(req.params.id);
+  res.status(200).json({ comments });
+});
+
+app.post('/api/safety/action', requireAuth, (req: Request, res: Response) => {
+  try {
+    const { targetId, actionType, reason } = req.body;
+    if (!['block', 'mute', 'report'].includes(actionType)) {
+      res.status(400).json({ error: 'Invalid safety action type' });
+      return;
+    }
+    db.recordSafetyAction(req.user!.id, targetId, actionType, reason);
+    res.status(200).json({ success: true, message: `Action '${actionType}' recorded.` });
+  } catch {
+    res.status(400).json({ error: 'Invalid action target' });
+  }
+});
+
+// ==========================================
+// MESSAGING API (PROTOTYPE ONLY - NOT E2EE)
+// ==========================================
+
+app.get('/api/conversations', requireAuth, (req: Request, res: Response) => {
+  const convs = db.getUserConversations(req.user!.id);
+  res.status(200).json({ conversations: convs, securityStatus: 'PROTOTYPE ONLY — NOT END-TO-END ENCRYPTED' });
+});
+
+app.post('/api/conversations', requireAuth, (req: Request, res: Response) => {
+  try {
+    const { targetUsername } = req.body;
+    const targetUser = db.findUserByUsername(targetUsername);
+    if (!targetUser) {
+      res.status(404).json({ error: 'Target user not found' });
+      return;
+    }
+    const conv = db.getOrCreateConversation(req.user!.id, targetUser.id);
+    res.status(200).json({ conversation: conv, targetUser: db.toSafeUser(targetUser) });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get('/api/conversations/:id/messages', requireAuth, (req: Request, res: Response) => {
+  try {
+    const messages = db.getConversationMessages(req.params.id, req.user!.id);
+    res.status(200).json({ messages });
+  } catch {
+    res.status(403).json({ error: 'Unauthorized to view this conversation' });
+  }
+});
+
+app.post('/api/conversations/:id/messages', requireAuth, (req: Request, res: Response) => {
+  try {
+    const { content } = req.body;
+    if (!content || typeof content !== 'string' || content.trim().length === 0) {
+      res.status(400).json({ error: 'Message content cannot be empty' });
+      return;
+    }
+    const message = db.sendMessage(req.params.id, req.user!.id, content);
+    res.status(201).json({ message });
+  } catch {
+    res.status(403).json({ error: 'Unauthorized to send to this conversation' });
+  }
+});
+
+// ==========================================
+// GEMINI AI & GROUNDING API (SERVER ONLY)
+// ==========================================
+
+const getAiClient = () => {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new Error('GEMINI_API_KEY environment variable is not configured');
+  }
+  return new GoogleGenAI({
+    apiKey,
+    httpOptions: {
+      headers: {
+        'User-Agent': 'aistudio-build',
+      },
+    },
+  });
+};
+
+// Cove AI Chatbot (with conditional Google Search or Google Maps grounding)
+app.post('/api/ai/chat', async (req: Request, res: Response) => {
+  try {
+    const { prompt, history, mode, enableSearch, enableMaps } = req.body;
+
+    if (!prompt || typeof prompt !== 'string' || prompt.trim().length === 0) {
+      res.status(400).json({ error: 'Prompt is required' });
+      return;
+    }
+
+    if (prompt.length > 4000) {
+      res.status(400).json({ error: 'Prompt exceeds 4000 character limit' });
+      return;
+    }
+
+    const ai = getAiClient();
+    const model = 'gemini-3.8-flash';
+
+    // Tool Routing governed by user controls:
+    let tools: any[] | undefined = undefined;
+    const lowerPrompt = prompt.toLowerCase();
+
+    // Check if user explicitly toggled Search grounding
+    if (enableSearch === true || mode === 'search') {
+      tools = [{ googleSearch: {} }];
+    } else if (enableMaps === true || mode === 'maps') {
+      tools = [{ googleMaps: {} }];
+    } else if (enableSearch === false) {
+      // User explicitly turned search grounding OFF -> no search tool
+      tools = undefined;
+    } else {
+      // Auto detect if neither explicitly toggled
+      const isLocationIntent = /\b(where is|directions to|nearby|restaurant|cafe|hotel|city|address|map of|located in)\b/i.test(lowerPrompt);
+      const isSearchIntent = /\b(latest|news|recent|weather|price|who is|what happened|2025|2026|today|update|research)\b/i.test(lowerPrompt);
+
+      if (isLocationIntent) {
+        tools = [{ googleMaps: {} }];
+      } else if (isSearchIntent) {
+        tools = [{ googleSearch: {} }];
+      }
+    }
+
+    const systemInstruction = `You are Cove AI, a thoughtful, clear assistant inside the Cove social platform.
+Cove stands for public discovery and private conversations with honest technology.
+Provide concise, accurate, helpful answers. When sources or places are returned via tools, present them cleanly.
+Never hallucinate citations or pretend you accessed user private direct messages.`;
+
+    const contents: any[] = [];
+    if (Array.isArray(history)) {
+      for (const h of history.slice(-6)) {
+        if (h.role && h.text) {
+          contents.push({
+            role: h.role === 'user' ? 'user' : 'model',
+            parts: [{ text: h.text }],
+          });
+        }
+      }
+    }
+    contents.push({
+      role: 'user',
+      parts: [{ text: prompt }],
+    });
+
+    const response = await ai.models.generateContent({
+      model,
+      contents,
+      config: {
+        systemInstruction,
+        tools,
+      },
+    });
+
+    const text = response.text || '';
+    const groundingMetadata = response.candidates?.[0]?.groundingMetadata;
+
+    // Extract search citations if present
+    const webSources: { title?: string; uri?: string }[] = [];
+    if (groundingMetadata?.groundingChunks) {
+      for (const chunk of groundingMetadata.groundingChunks) {
+        if (chunk.web?.uri) {
+          webSources.push({
+            title: chunk.web.title || chunk.web.uri,
+            uri: chunk.web.uri,
+          });
+        }
+      }
+    }
+
+    // Extract search queries if present
+    const searchQueries: string[] = groundingMetadata?.webSearchQueries || [];
+
+    const toolUsed = tools?.some(t => 'googleSearch' in t)
+      ? 'search'
+      : tools?.some(t => 'googleMaps' in t)
+      ? 'maps'
+      : 'none';
+
+    res.status(200).json({
+      text,
+      toolUsed,
+      sources: webSources,
+      searchQueries,
+    });
+  } catch (err: any) {
+    console.error('[AI] Chat error:', err);
+    res.status(500).json({
+      error: 'AI assistant service temporarily unavailable',
+      details: err.message,
+    });
+  }
+});
+
+// Messaging AI Assist (Drafting, rewriting, translating, summarizing explicitly selected text)
+app.post('/api/ai/message-assist', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const { action, text, tone, targetLanguage } = req.body;
+
+    if (!text || typeof text !== 'string' || text.trim().length === 0) {
+      res.status(400).json({ error: 'Text content is required for AI assistance' });
+      return;
+    }
+
+    if (text.length > 2000) {
+      res.status(400).json({ error: 'Selected text cannot exceed 2000 characters' });
+      return;
+    }
+
+    const ai = getAiClient();
+    let promptInstruction = '';
+
+    switch (action) {
+      case 'rewrite':
+        promptInstruction = `Rewrite the following draft to be ${tone || 'clear and polite'}. Return ONLY the revised draft without introductory remarks: "${text}"`;
+        break;
+      case 'shorten':
+        promptInstruction = `Make the following message concise and direct while preserving its core intent. Return ONLY the revised draft: "${text}"`;
+        break;
+      case 'translate':
+        promptInstruction = `Translate the following text accurately into ${targetLanguage || 'Spanish'}. Return ONLY the translation: "${text}"`;
+        break;
+      case 'summarize':
+        promptInstruction = `Summarize the key points of the following message in 1-2 bullet points: "${text}"`;
+        break;
+      case 'draft_reply':
+        promptInstruction = `Draft a thoughtful, respectful reply based on this note: "${text}". Return ONLY the reply text:`;
+        break;
+      default:
+        promptInstruction = `Improve the clarity and flow of the following message: "${text}"`;
+    }
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.8-flash',
+      contents: promptInstruction,
+      config: {
+        systemInstruction: 'You are an assistive editor inside Cove private messaging. Produce natural, human-sounding drafts. Never output conversational filler or preamble.',
+      },
+    });
+
+    const suggestion = response.text || '';
+    res.status(200).json({ suggestion });
+  } catch (err: any) {
+    console.error('[AI] Assist error:', err);
+    res.status(500).json({ error: 'AI assist failed', details: err.message });
+  }
+});
+
+// ==========================================
+// VITE SPA STATIC / MIDDLEWARE SERVING
+// ==========================================
+
+async function startServer() {
+  if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(__dirname, 'dist');
+    app.use(express.static(distPath));
+    app.get('*', (_req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
+  }
+
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`[COVE] Server running on http://0.0.0.0:${PORT}`);
+  });
+}
+
+startServer().catch((err) => {
+  console.error('[COVE] Server failed to start:', err);
+  process.exit(1);
+});
