@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { api } from './lib/api';
+import { testFirestoreConnection } from './lib/firebase';
 import { presenceManager } from './lib/presence';
 import { SafeUser } from './types';
 import { LoginView } from './components/auth/LoginView';
@@ -30,6 +31,7 @@ export default function App() {
   const [targetChatUsername, setTargetChatUsername] = useState<string | null>(null);
 
   useEffect(() => {
+    testFirestoreConnection();
     checkCurrentSession();
   }, []);
 
