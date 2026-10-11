@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { X, MessageSquare, Shield, ShieldAlert, UserCheck, UserPlus, Globe, Heart, AlertTriangle, Users, Lock, Clock } from 'lucide-react';
 import { api } from '../../lib/api';
+import { useUserPresence, formatLastSeen } from '../../lib/presence';
 import { SafeUser, Post, UserStats } from '../../types';
 
 interface UserProfileModalProps {
@@ -25,6 +26,11 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   const [isFollowLoading, setIsFollowLoading] = useState(false);
   const [safetyMenuOpen, setSafetyMenuOpen] = useState(false);
   const [safetySuccess, setSafetySuccess] = useState<string | null>(null);
+
+  // Real-time presence subscription
+  const livePresence = useUserPresence(user?.id);
+  const isOnline = livePresence?.isOnline ?? user?.isOnline ?? false;
+  const lastSeen = livePresence?.lastSeen ?? user?.lastSeen;
 
   useEffect(() => {
     loadUserData();
@@ -133,20 +139,47 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
               {/* Header Info */}
               <div className="flex items-start justify-between gap-4">
                 <div className="flex items-center gap-3.5 min-w-0">
-                  <div className="w-16 h-16 rounded-full bg-slate-100 overflow-hidden border-2 border-slate-200 shrink-0">
-                    {user.avatarUrl ? (
-                      <img src={user.avatarUrl} alt={user.displayName} className="w-full h-full object-cover" />
-                    ) : (
-                      <div className="w-full h-full flex items-center justify-center font-bold text-slate-600 text-xl font-display">
-                        {user.displayName.charAt(0)}
-                      </div>
-                    )}
+                  <div className="relative shrink-0">
+                    <div className="w-16 h-16 rounded-full bg-slate-100 overflow-hidden border-2 border-slate-200">
+                      {user.avatarUrl ? (
+                        <img src={user.avatarUrl} alt={user.displayName} className="w-full h-full object-cover" />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center font-bold text-slate-600 text-xl font-display">
+                          {user.displayName.charAt(0)}
+                        </div>
+                      )}
+                    </div>
+                    {/* Real-time Online/Offline Status Indicator */}
+                    <span
+                      className={`absolute bottom-0.5 right-0.5 w-4 h-4 rounded-full border-2 border-white shadow-xs ${
+                        isOnline
+                          ? 'bg-emerald-500 ring-2 ring-emerald-500/20'
+                          : 'bg-slate-300'
+                      }`}
+                      title={isOnline ? 'Active Now' : formatLastSeen(lastSeen)}
+                    />
                   </div>
+
                   <div className="min-w-0">
-                    <h2 className="text-base font-extrabold text-slate-900 font-display truncate">
-                      {user.displayName}
-                    </h2>
-                    <span className="text-xs text-slate-400 font-mono block truncate">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h2 className="text-base font-extrabold text-slate-900 font-display truncate">
+                        {user.displayName}
+                      </h2>
+                      {/* Real-time Status Badge */}
+                      {isOnline ? (
+                        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200/80 shadow-2xs">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                          {isMe ? 'Active Now (You)' : 'Active Now'}
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-slate-100 text-slate-500 border border-slate-200/80">
+                          <span className="w-1.5 h-1.5 rounded-full bg-slate-400" />
+                          {formatLastSeen(lastSeen)}
+                        </span>
+                      )}
+                    </div>
+
+                    <span className="text-xs text-slate-400 font-mono block truncate mt-0.5">
                       @{user.username}
                     </span>
                     <span className="text-[11px] text-slate-500 mt-1 block">

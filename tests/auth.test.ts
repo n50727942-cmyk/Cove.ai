@@ -212,6 +212,22 @@ async function runAuthTests() {
     assert.strictEqual(privateMember.isFollowing, true, 'Alex is following privatecreator');
   });
 
+  // TEST 12: Real-Time Presence Status Formatting
+  test('12. Presence Status: formatLastSeen correctly calculates activity windows', async () => {
+    const { formatLastSeen } = await import('../src/lib/presence');
+    assert.strictEqual(formatLastSeen(undefined), 'Offline');
+    assert.strictEqual(formatLastSeen(''), 'Offline');
+
+    const justNow = new Date(Date.now() - 10 * 1000).toISOString();
+    assert.strictEqual(formatLastSeen(justNow), 'Active just now');
+
+    const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    assert.strictEqual(formatLastSeen(tenMinAgo), 'Active 10m ago');
+
+    const twoHoursAgo = new Date(Date.now() - 2 * 3600 * 1000).toISOString();
+    assert.strictEqual(formatLastSeen(twoHoursAgo), 'Active 2h ago');
+  });
+
   // Clean up test file
   if (fs.existsSync(testDbPath)) {
     fs.unlinkSync(testDbPath);

@@ -4,15 +4,19 @@ class ApiClient {
   private token: string | null = null;
 
   constructor() {
-    this.token = localStorage.getItem('cove_token');
+    if (typeof localStorage !== 'undefined') {
+      this.token = localStorage.getItem('cove_token');
+    }
   }
 
   public setToken(token: string | null) {
     this.token = token;
-    if (token) {
-      localStorage.setItem('cove_token', token);
-    } else {
-      localStorage.removeItem('cove_token');
+    if (typeof localStorage !== 'undefined') {
+      if (token) {
+        localStorage.setItem('cove_token', token);
+      } else {
+        localStorage.removeItem('cove_token');
+      }
     }
   }
 
@@ -227,6 +231,8 @@ class ApiClient {
     toolUsed: 'search' | 'maps' | 'none';
     sources?: AISource[];
     searchQueries?: string[];
+    isQuotaFallback?: boolean;
+    warning?: string;
   }> {
     return this.request('/api/ai/chat', {
       method: 'POST',
@@ -240,7 +246,7 @@ class ApiClient {
     text: string;
     tone?: string;
     targetLanguage?: string;
-  }): Promise<{ suggestion: string }> {
+  }): Promise<{ suggestion: string; warning?: string }> {
     return this.request('/api/ai/message-assist', {
       method: 'POST',
       body: JSON.stringify(payload),
@@ -252,6 +258,17 @@ class ApiClient {
     return this.request('/api/ai/transcribe', {
       method: 'POST',
       body: JSON.stringify({ audioData, mimeType }),
+    });
+  }
+
+  // Real-Time Presence
+  public async getPresenceSnapshot(): Promise<{ presence: Record<string, { isOnline: boolean; lastSeen: string }> }> {
+    return this.request<{ presence: Record<string, { isOnline: boolean; lastSeen: string }> }>('/api/presence/status');
+  }
+
+  public async sendHeartbeat(): Promise<{ ok: boolean; isOnline: boolean }> {
+    return this.request<{ ok: boolean; isOnline: boolean }>('/api/presence/heartbeat', {
+      method: 'POST',
     });
   }
 }

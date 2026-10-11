@@ -6,8 +6,17 @@ export interface SafeUser {
   avatarUrl: string;
   isPrivate: boolean;
   hasCompletedOnboarding: boolean;
+  isOnline?: boolean;
+  lastSeen?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface UserPresence {
+  userId: string;
+  username?: string;
+  isOnline: boolean;
+  lastSeen: string;
 }
 
 export interface UserStats {
@@ -82,5 +91,7 @@ export interface AIChatMessage {
   toolUsed?: 'search' | 'maps' | 'none';
   sources?: AISource[];
   searchQueries?: string[];
+  warning?: string;
+  isQuotaFallback?: boolean;
   timestamp: string;
 }

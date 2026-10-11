@@ -251,6 +251,8 @@ export const CoveAiPanel: React.FC<CoveAiPanelProps> = ({ isOpen, onClose }) => 
         toolUsed: res.toolUsed,
         sources: res.sources,
         searchQueries: res.searchQueries,
+        warning: res.warning,
+        isQuotaFallback: res.isQuotaFallback,
         timestamp: new Date().toISOString(),
       };
 
@@ -425,6 +427,26 @@ export const CoveAiPanel: React.FC<CoveAiPanelProps> = ({ isOpen, onClose }) => 
                       </div>
                     </div>
                   )}
+
+                  {/* Warning Notice (e.g. Quota fallback or grounding rate notice) */}
+                  {m.warning && (
+                    <div className="mt-3 p-2.5 rounded-xl bg-amber-50/90 border border-amber-200/80 text-amber-900 text-xs flex items-start gap-2">
+                      <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                      <div className="flex-1 space-y-1.5">
+                        <p className="font-medium text-[11px] leading-tight">{m.warning}</p>
+                        {m.isQuotaFallback && isSearchEnabled && (
+                          <button
+                            type="button"
+                            onClick={() => setIsSearchEnabled(false)}
+                            className="inline-flex items-center gap-1 text-[11px] font-bold text-[#2D5AFF] hover:underline cursor-pointer"
+                          >
+                            <Globe className="w-3 h-3" />
+                            Turn Search Grounding OFF for next query
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             );
@@ -438,9 +460,32 @@ export const CoveAiPanel: React.FC<CoveAiPanelProps> = ({ isOpen, onClose }) => 
           )}
 
           {error && (
-            <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
-              <span>{error}</span>
+            <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs space-y-2">
+              <div className="flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                <span className="font-medium leading-relaxed">{error}</span>
+              </div>
+              <div className="flex items-center gap-2 pt-1 border-t border-rose-200/70">
+                {isSearchEnabled && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsSearchEnabled(false);
+                      setError(null);
+                    }}
+                    className="px-2.5 py-1 bg-white border border-rose-300 text-rose-900 rounded-lg text-[11px] font-bold hover:bg-rose-100 transition-colors cursor-pointer"
+                  >
+                    Toggle Search OFF & Dismiss
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setError(null)}
+                  className="px-2.5 py-1 bg-rose-600 text-white rounded-lg text-[11px] font-bold hover:bg-rose-700 transition-colors cursor-pointer"
+                >
+                  Dismiss
+                </button>
+              </div>
             </div>
           )}
 

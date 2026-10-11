@@ -82,6 +82,8 @@ const authenticate = (req: Request, res: Response, next: NextFunction): void => 
 
   if (authHeader && authHeader.startsWith('Bearer ')) {
     token = authHeader.substring(7).trim();
+  } else if (req.query && typeof req.query.token === 'string') {
+    token = req.query.token;
   } else if (req.headers.cookie) {
     const match = req.headers.cookie.match(/cove_session=([^;]+)/);
     if (match) token = match[1];
@@ -107,6 +109,184 @@ const requireAuth = (req: Request, res: Response, next: NextFunction): void => {
 };
 
 app.use(authenticate);
+
+// ==========================================
+// REAL-TIME PRESENCE SERVICE
+// ==========================================
+
+interface PresenceEntry {
+  userId: string;
+  username: string;
+  lastSeen: number; // ms
+  activeConnections: Set<Response>;
+}
+
+class PresenceService {
+  private presence = new Map<string, PresenceEntry>();
+  private allStreams = new Set<Response>();
+
+  constructor() {
+    // Seed realistic baseline presence for exploratory profiles
+    const now = Date.now();
+    this.presence.set('u_maya', {
+      userId: 'u_maya',
+      username: 'maya_zen',
+      lastSeen: now - 4 * 60 * 1000, // 4m ago
+      activeConnections: new Set(),
+    });
+    this.presence.set('u_dev_elena', {
+      userId: 'u_dev_elena',
+      username: 'dev_elena',
+      lastSeen: now - 18 * 60 * 1000, // 18m ago
+      activeConnections: new Set(),
+    });
+    this.presence.set('u_kai', {
+      userId: 'u_kai',
+      username: 'kai_orbit',
+      lastSeen: now - 72 * 60 * 1000, // 1h ago
+      activeConnections: new Set(),
+    });
+
+    // Send keepalive comment to SSE streams every 15 seconds
+    setInterval(() => {
+      this.pingAll();
+    }, 15000);
+  }
+
+  public addClient(user: SafeUser, res: Response) {
+    let entry = this.presence.get(user.id);
+    const wasOnline = this.isUserOnline(user.id);
+
+    if (!entry) {
+      entry = {
+        userId: user.id,
+        username: user.username,
+        lastSeen: Date.now(),
+        activeConnections: new Set(),
+      };
+      this.presence.set(user.id, entry);
+    }
+
+    entry.lastSeen = Date.now();
+    entry.activeConnections.add(res);
+    this.allStreams.add(res);
+
+    if (!wasOnline) {
+      this.broadcast({
+        type: 'presence:update',
+        userId: user.id,
+        username: user.username,
+        isOnline: true,
+        lastSeen: new Date(entry.lastSeen).toISOString(),
+      });
+    }
+
+    // Send initial snapshot
+    const snapshot = this.getSnapshot();
+    res.write(`event: presence:init\ndata: ${JSON.stringify(snapshot)}\n\n`);
+
+    res.on('close', () => {
+      this.removeClient(user.id, res);
+    });
+  }
+
+  public heartbeat(user: SafeUser) {
+    let entry = this.presence.get(user.id);
+    const wasOnline = this.isUserOnline(user.id);
+
+    if (!entry) {
+      entry = {
+        userId: user.id,
+        username: user.username,
+        lastSeen: Date.now(),
+        activeConnections: new Set(),
+      };
+      this.presence.set(user.id, entry);
+    }
+    entry.lastSeen = Date.now();
+
+    if (!wasOnline) {
+      this.broadcast({
+        type: 'presence:update',
+        userId: user.id,
+        username: user.username,
+        isOnline: true,
+        lastSeen: new Date(entry.lastSeen).toISOString(),
+      });
+    }
+  }
+
+  public removeClient(userId: string, res: Response) {
+    this.allStreams.delete(res);
+    const entry = this.presence.get(userId);
+    if (!entry) return;
+
+    entry.activeConnections.delete(res);
+    entry.lastSeen = Date.now();
+
+    if (entry.activeConnections.size === 0) {
+      this.broadcast({
+        type: 'presence:update',
+        userId: entry.userId,
+        username: entry.username,
+        isOnline: false,
+        lastSeen: new Date(entry.lastSeen).toISOString(),
+      });
+    }
+  }
+
+  public isUserOnline(userId: string): boolean {
+    const entry = this.presence.get(userId);
+    if (!entry) return false;
+    if (entry.activeConnections.size > 0) return true;
+    return Date.now() - entry.lastSeen < 45000;
+  }
+
+  public getUserPresence(userId: string): { isOnline: boolean; lastSeen: string } {
+    const entry = this.presence.get(userId);
+    if (!entry) {
+      return { isOnline: false, lastSeen: new Date(0).toISOString() };
+    }
+    return {
+      isOnline: this.isUserOnline(userId),
+      lastSeen: new Date(entry.lastSeen).toISOString(),
+    };
+  }
+
+  public getSnapshot(): Record<string, { isOnline: boolean; lastSeen: string }> {
+    const snapshot: Record<string, { isOnline: boolean; lastSeen: string }> = {};
+    for (const [userId, entry] of this.presence.entries()) {
+      snapshot[userId] = {
+        isOnline: this.isUserOnline(userId),
+        lastSeen: new Date(entry.lastSeen).toISOString(),
+      };
+    }
+    return snapshot;
+  }
+
+  private broadcast(data: any) {
+    const msg = `event: presence:update\ndata: ${JSON.stringify(data)}\n\n`;
+    for (const client of this.allStreams) {
+      try {
+        client.write(msg);
+      } catch {
+        this.allStreams.delete(client);
+      }
+    }
+  }
+
+  private pingAll() {
+    for (const client of this.allStreams) {
+      try {
+        client.write(': ping\n\n');
+      } catch {
+        this.allStreams.delete(client);
+      }
+    }
+  }
+}
+
+const presenceService = new PresenceService();
 
 // ==========================================
 // AUTHENTICATION & RECOVERY API
@@ -361,7 +541,18 @@ app.get('/api/users/:username', (req: Request, res: Response) => {
   const isFollowing = req.user ? db.isFollowing(req.user.id, user.id) : false;
   const followStatus = req.user ? db.getFollowStatus(req.user.id, user.id) : { isFollowing: false, isPending: false };
   const stats = db.getUserStats(user.id);
-  res.status(200).json({ user: safe, isFollowing, isPending: followStatus.isPending, stats });
+  const presence = presenceService.getUserPresence(user.id);
+
+  res.status(200).json({
+    user: {
+      ...safe,
+      isOnline: presence.isOnline,
+      lastSeen: presence.lastSeen,
+    },
+    isFollowing,
+    isPending: followStatus.isPending,
+    stats,
+  });
 });
 
 app.post('/api/users/:username/follow', requireAuth, (req: Request, res: Response) => {
@@ -450,7 +641,18 @@ app.post('/api/safety/action', requireAuth, (req: Request, res: Response) => {
 
 app.get('/api/conversations', requireAuth, (req: Request, res: Response) => {
   const convs = db.getUserConversations(req.user!.id);
-  res.status(200).json({ conversations: convs, securityStatus: 'PROTOTYPE ONLY — NOT END-TO-END ENCRYPTED' });
+  const withPresence = convs.map((c) => {
+    const presence = presenceService.getUserPresence(c.otherParticipant.id);
+    return {
+      ...c,
+      otherParticipant: {
+        ...c.otherParticipant,
+        isOnline: presence.isOnline,
+        lastSeen: presence.lastSeen,
+      },
+    };
+  });
+  res.status(200).json({ conversations: withPresence, securityStatus: 'PROTOTYPE ONLY — NOT END-TO-END ENCRYPTED' });
 });
 
 app.post('/api/conversations', requireAuth, (req: Request, res: Response) => {
@@ -462,10 +664,38 @@ app.post('/api/conversations', requireAuth, (req: Request, res: Response) => {
       return;
     }
     const conv = db.getOrCreateConversation(req.user!.id, targetUser.id);
-    res.status(200).json({ conversation: conv, targetUser: db.toSafeUser(targetUser) });
+    const presence = presenceService.getUserPresence(targetUser.id);
+    const targetWithPresence = {
+      ...db.toSafeUser(targetUser),
+      isOnline: presence.isOnline,
+      lastSeen: presence.lastSeen,
+    };
+    res.status(200).json({ conversation: conv, targetUser: targetWithPresence });
   } catch (err: any) {
     res.status(400).json({ error: err.message });
   }
+});
+
+// Real-Time Presence SSE Stream
+app.get('/api/presence/stream', requireAuth, (req: Request, res: Response) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+
+  presenceService.addClient(req.user!, res);
+});
+
+// Presence Heartbeat
+app.post('/api/presence/heartbeat', requireAuth, (req: Request, res: Response) => {
+  presenceService.heartbeat(req.user!);
+  res.status(200).json({ ok: true, isOnline: true });
+});
+
+// Presence Status Snapshot
+app.get('/api/presence/status', (_req: Request, res: Response) => {
+  res.status(200).json({ presence: presenceService.getSnapshot() });
 });
 
 app.get('/api/conversations/:id/messages', requireAuth, (req: Request, res: Response) => {
@@ -510,7 +740,23 @@ const getAiClient = () => {
   });
 };
 
-// Cove AI Chatbot (with conditional Google Search or Google Maps grounding)
+function isQuotaError(err: any): boolean {
+  if (!err) return false;
+  const str = (typeof err === 'string' ? err : (err.message || '') + ' ' + JSON.stringify(err)).toLowerCase();
+  return (
+    err.status === 429 ||
+    err.status === 'RESOURCE_EXHAUSTED' ||
+    err.statusCode === 429 ||
+    err.code === 429 ||
+    str.includes('429') ||
+    str.includes('quota') ||
+    str.includes('resource_exhausted') ||
+    str.includes('rate-limit') ||
+    str.includes('rate limit')
+  );
+}
+
+// Cove AI Chatbot (with conditional Google Search or Google Maps grounding & quota resiliency)
 app.post('/api/ai/chat', async (req: Request, res: Response) => {
   try {
     const { prompt, history, mode, enableSearch, enableMaps } = req.body;
@@ -573,17 +819,82 @@ Never hallucinate citations or pretend you accessed user private direct messages
       parts: [{ text: prompt }],
     });
 
-    const response = await ai.models.generateContent({
-      model,
-      contents,
-      config: {
-        systemInstruction,
-        tools,
-      },
-    });
+    let response: any;
+    let effectiveTools = tools;
+    let fallbackNotice: string | undefined = undefined;
 
-    const text = response.text || '';
-    const groundingMetadata = response.candidates?.[0]?.groundingMetadata;
+    try {
+      response = await ai.models.generateContent({
+        model,
+        contents,
+        config: {
+          systemInstruction,
+          tools: effectiveTools,
+        },
+      });
+    } catch (err: any) {
+      if (isQuotaError(err)) {
+        console.warn('[AI] Primary request hit quota / rate limit (429). Attempting graceful fallback...');
+
+        // Step 1: If search or maps tools were requested, retry without tools
+        // (Tool Grounding quotas are much stricter than raw text generation)
+        if (effectiveTools && effectiveTools.length > 0) {
+          try {
+            effectiveTools = undefined;
+            fallbackNotice = 'Search grounding quota was exceeded; answered with general knowledge.';
+            response = await ai.models.generateContent({
+              model,
+              contents,
+              config: {
+                systemInstruction,
+              },
+            });
+          } catch (retryErr: any) {
+            if (!isQuotaError(retryErr)) {
+              throw retryErr;
+            }
+          }
+        }
+
+        // Step 2: Try lightweight model gemini-3.1-flash-lite
+        if (!response) {
+          try {
+            effectiveTools = undefined;
+            fallbackNotice = 'Answered via Gemini Flash Lite due to high traffic.';
+            response = await ai.models.generateContent({
+              model: 'gemini-3.1-flash-lite',
+              contents,
+              config: {
+                systemInstruction,
+              },
+            });
+          } catch (liteErr: any) {
+            if (!isQuotaError(liteErr)) {
+              throw liteErr;
+            }
+          }
+        }
+
+        // Step 3: If all Gemini model quotas are exhausted on the key, return structured fallback without crashing
+        if (!response) {
+          const cleanTopic = prompt.replace(/[^\w\s]/g, '').trim().slice(0, 50);
+          res.status(200).json({
+            text: `⚠️ **Gemini API Rate Limit Reached (429 Resource Exhausted)**\n\nThe Google Gemini API service is currently experiencing high demand or quota limits on this environment.\n\n**Quick Tips:**\n• Toggle **Search Grounding OFF** using the switch above to reduce quota consumption.\n• Wait approximately 30-60 seconds for the current rate-limit window to refresh.\n• You can also explore real posts and members under the **Explore** tab in the meantime.\n\n*Your query about "${cleanTopic}" has been received.*`,
+            toolUsed: 'none',
+            sources: [],
+            searchQueries: [],
+            isQuotaFallback: true,
+            warning: 'Gemini API quota reached. Please wait a moment or toggle off Search Grounding.',
+          });
+          return;
+        }
+      } else {
+        throw err;
+      }
+    }
+
+    const text = response?.text || '';
+    const groundingMetadata = response?.candidates?.[0]?.groundingMetadata;
 
     // Extract search citations if present
     const webSources: { title?: string; uri?: string }[] = [];
@@ -601,9 +912,9 @@ Never hallucinate citations or pretend you accessed user private direct messages
     // Extract search queries if present
     const searchQueries: string[] = groundingMetadata?.webSearchQueries || [];
 
-    const toolUsed = tools?.some(t => 'googleSearch' in t)
+    const toolUsed = effectiveTools?.some((t: any) => 'googleSearch' in t)
       ? 'search'
-      : tools?.some(t => 'googleMaps' in t)
+      : effectiveTools?.some((t: any) => 'googleMaps' in t)
       ? 'maps'
       : 'none';
 
@@ -612,9 +923,21 @@ Never hallucinate citations or pretend you accessed user private direct messages
       toolUsed,
       sources: webSources,
       searchQueries,
+      warning: fallbackNotice,
     });
   } catch (err: any) {
-    console.error('[AI] Chat error:', err);
+    if (isQuotaError(err)) {
+      res.status(200).json({
+        text: `⚠️ **Gemini API Rate Limit (429)**: Quota limits reached. Please toggle off Search Grounding or try again in a few moments.`,
+        toolUsed: 'none',
+        sources: [],
+        searchQueries: [],
+        isQuotaFallback: true,
+        warning: 'Gemini API quota exceeded.',
+      });
+      return;
+    }
+    console.error('[AI] Chat error:', err.message || err);
     res.status(500).json({
       error: 'AI assistant service temporarily unavailable',
       details: err.message,
@@ -652,7 +975,15 @@ app.post('/api/ai/transcribe', async (req: Request, res: Response) => {
     const transcript = response.text?.trim() || '';
     res.status(200).json({ text: transcript });
   } catch (err: any) {
-    console.error('[AI] Transcribe error:', err);
+    if (isQuotaError(err)) {
+      console.warn('[AI] Transcribe quota reached (429)');
+      res.status(200).json({
+        text: '',
+        warning: 'Audio transcription quota limit reached. Please type your query or use native speech recognition.',
+      });
+      return;
+    }
+    console.error('[AI] Transcribe error:', err.message || err);
     res.status(500).json({ error: 'Audio transcription failed', details: err.message });
   }
 });
@@ -695,18 +1026,42 @@ app.post('/api/ai/message-assist', requireAuth, async (req: Request, res: Respon
         promptInstruction = `Improve the clarity and flow of the following message: "${text}"`;
     }
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: promptInstruction,
-      config: {
-        systemInstruction: 'You are an assistive editor inside Cove private messaging. Produce natural, human-sounding drafts. Never output conversational filler or preamble.',
-      },
-    });
+    let response: any;
+    try {
+      response = await ai.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents: promptInstruction,
+        config: {
+          systemInstruction: 'You are an assistive editor inside Cove private messaging. Produce natural, human-sounding drafts. Never output conversational filler or preamble.',
+        },
+      });
+    } catch (err: any) {
+      if (isQuotaError(err)) {
+        console.warn('[AI] Message assist quota reached (429), using fallback');
+        let fallback = text;
+        if (action === 'shorten') {
+          const sentences = text.split(/(?<=[.?!])\s+/);
+          fallback = sentences.slice(0, 2).join(' ') || text.slice(0, 80);
+        } else if (action === 'rewrite') {
+          fallback = text.trim().charAt(0).toUpperCase() + text.trim().slice(1);
+        } else if (action === 'draft_reply') {
+          fallback = `Thank you for sharing this! I appreciate your message and will review it shortly.`;
+        } else if (action === 'summarize') {
+          fallback = `• Key point: ${text.slice(0, 100)}...`;
+        }
+        res.status(200).json({
+          suggestion: fallback,
+          warning: 'AI assist quota limit reached. A baseline edit was generated.',
+        });
+        return;
+      }
+      throw err;
+    }
 
     const suggestion = response.text || '';
     res.status(200).json({ suggestion });
   } catch (err: any) {
-    console.error('[AI] Assist error:', err);
+    console.error('[AI] Assist error:', err.message || err);
     res.status(500).json({ error: 'AI assist failed', details: err.message });
   }
 });

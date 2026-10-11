@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { api } from './lib/api';
+import { presenceManager } from './lib/presence';
 import { SafeUser } from './types';
 import { LoginView } from './components/auth/LoginView';
 import { RegisterView } from './components/auth/RegisterView';
@@ -31,6 +32,18 @@ export default function App() {
   useEffect(() => {
     checkCurrentSession();
   }, []);
+
+  useEffect(() => {
+    const token = api.getToken();
+    if (currentUser && token) {
+      presenceManager.init(token);
+    } else {
+      presenceManager.disconnect();
+    }
+    return () => {
+      presenceManager.disconnect();
+    };
+  }, [currentUser]);
 
   const checkCurrentSession = async () => {
     setIsCheckingAuth(true);
